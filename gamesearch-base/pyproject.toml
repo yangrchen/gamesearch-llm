@@ -1,0 +1,26 @@
+[project]
+name = "gamesearch-base"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Yang Chen", email = "yangrc.chen@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.115.12",
+    "langchain-anthropic>=0.3.10",
+    "langgraph>=0.3.20",
+]
+
+[project.scripts]
+gamesearch-base = "gamesearch_base.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.11.2",
+]
