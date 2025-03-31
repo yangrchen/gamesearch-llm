@@ -24,21 +24,29 @@ type AuthTokenResponse struct {
 }
 
 type Game struct {
-	ID                int    `json:"id"`
-	Name              string `json:"name"`
-	FirstReleaseDate  int    `json:"first_release_date"`
-	DLCID             []int  `json:"dlcs"`
-	FranchiseID       []int  `json:"franchises"`
-	GenreID           []int  `json:"genres"`
-	MultiplayerModeID []int  `json:"multiplayer_modes"`
-	PortID            []int  `json:"ports"`
-	Summary           string `json:"summary"`
+	ID               int    `json:"id"`
+	Name             string `json:"name"`
+	FirstReleaseDate int    `json:"first_release_date"`
+	Franchises       []int  `json:"franchises"`
+	Genres           []int  `json:"genres"`
+	Summary          string `json:"summary"`
+	// DLC            []int  `json:"dlcs"`
+	// MultiplayerModes []int  `json:"multiplayer_modes"`
+	// Ports            []int  `json:"ports"`
 }
 
 type Genre struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
 }
 
-type Fetcher[T Game | Genre] struct {
+type Franchise struct {
+	ID    int    `json:"id"`
+	Name  string `json:"name"`
+	Games []int  `json:"games"`
+}
+
+type Fetcher[T Game | Genre | Franchise] struct {
 	clientID    string
 	accessToken string
 	url         string
@@ -48,7 +56,6 @@ type Fetcher[T Game | Genre] struct {
 }
 
 func (f *Fetcher[T]) fetchQuery(query string) ([]T, error) {
-
 	req, err := http.NewRequest(http.MethodPost, f.url, bytes.NewBuffer([]byte(query)))
 	if err != nil {
 		return nil, err
@@ -70,12 +77,12 @@ func (f *Fetcher[T]) fetchQuery(query string) ([]T, error) {
 		return nil, fmt.Errorf("API returned status code %d: %s", resp.StatusCode, string(body))
 	}
 
-	var respStruct []T
-	if err := json.NewDecoder(resp.Body).Decode(&respStruct); err != nil {
+	var results []T
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
 		return nil, fmt.Errorf("Error decoding API response: %s", err)
 	}
 
-	return respStruct, nil
+	return results, nil
 }
 
 func (f *Fetcher[T]) fetchAll(query string, numWorkers, pageLimit int) []T {
@@ -134,6 +141,24 @@ func (f *Fetcher[T]) fetchAll(query string, numWorkers, pageLimit int) []T {
 	return results
 }
 
+func writeJSON(objects any, filepath string, logger *logrus.Logger) error {
+	file, err := os.Create(filepath)
+	if err != nil {
+		return fmt.Errorf("Error creating file: %s", err)
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+
+	if err := encoder.Encode(objects); err != nil {
+		return fmt.Errorf("Error writing objects to JSON: %s", err)
+	}
+
+	logger.Infof("Wrote JSON file at: %s", filepath)
+	return nil
+}
+
 func retrieveAuthToken(clientID, clientSecret string) (*AuthTokenResponse, error) {
 	authResp := new(AuthTokenResponse)
 	res, err := http.Post(fmt.Sprintf("https://id.twitch.tv/oauth2/token?client_id=%s&client_secret=%s&grant_type=client_credentials", clientID, clientSecret), "application/json", nil)
@@ -148,67 +173,6 @@ func retrieveAuthToken(clientID, clientSecret string) (*AuthTokenResponse, error
 
 	return authResp, nil
 }
-
-// func fetchQuery[T Game | Genre](query, clientID, accessToken, url string) ([]T, error) {
-// 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer([]byte(query)))
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	req.Header.Set("Client-ID", clientID)
-// 	req.Header.Set("Authorization", "Bearer "+accessToken)
-// 	req.Header.Set("Content-Type", "text/plain")
-
-// 	client := &http.Client{}
-// 	resp, err := client.Do(req)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	defer resp.Body.Close()
-
-// 	if resp.StatusCode != http.StatusOK {
-// 		body, _ := io.ReadAll(resp.Body)
-// 		return nil, fmt.Errorf("API returned status code %d: %s", resp.StatusCode, string(body))
-// 	}
-
-// 	var respStruct []T
-// 	if err := json.NewDecoder(resp.Body).Decode(&respStruct); err != nil {
-// 		return nil, fmt.Errorf("Error decoding API response: %s", err)
-// 	}
-
-// 	return respStruct, nil
-// }
-
-// func fetchGames(query, clientID, accessToken string) ([]Game, error) {
-// 	url := "https://api.igdb.com/v4/games"
-// 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer([]byte(query)))
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	req.Header.Set("Client-ID", clientID)
-// 	req.Header.Set("Authorization", "Bearer "+accessToken)
-// 	req.Header.Set("Content-Type", "text/plain")
-
-// 	client := &http.Client{}
-// 	resp, err := client.Do(req)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	defer resp.Body.Close()
-
-// 	if resp.StatusCode != http.StatusOK {
-// 		body, _ := io.ReadAll(resp.Body)
-// 		return nil, fmt.Errorf("API returned status code %d: %s", resp.StatusCode, string(body))
-// 	}
-
-// 	var games []Game
-// 	if err := json.NewDecoder(resp.Body).Decode(&games); err != nil {
-// 		return nil, fmt.Errorf("Error decoding API response: %s", err)
-// 	}
-
-// 	return games, nil
-// }
 
 func main() {
 
@@ -232,6 +196,18 @@ func main() {
 	numWorkers := 3
 	pageLimit := 500
 
+	genresFetcher := Fetcher[Genre]{
+		clientID:    clientID,
+		accessToken: authResp.AccessToken,
+		url:         "https://api.igdb.com/v4/genres",
+		limiter:     limiter,
+		ctx:         ctx,
+		logger:      log,
+	}
+	genresQuery := "fields id, name;"
+
+	genres := genresFetcher.fetchAll(genresQuery, numWorkers, pageLimit)
+
 	gamesFetcher := Fetcher[Game]{
 		clientID:    clientID,
 		accessToken: authResp.AccessToken,
@@ -240,74 +216,35 @@ func main() {
 		ctx:         ctx,
 		logger:      log,
 	}
-	gamesQuery := "fields name, first_release_date, dlcs, franchises, genres, multiplayer_modes, ports, summary;"
+	gamesQuery := "fields id, name, first_release_date, dlcs, franchises, genres, multiplayer_modes, ports, summary;"
 
-	gamesFetcher.fetchAll(gamesQuery, numWorkers, pageLimit)
+	games := gamesFetcher.fetchAll(gamesQuery, numWorkers, pageLimit)
 
-	// offsetChan := make(chan int, 5)
-	// gameResults := make(chan []Game)
+	franchisesFetcher := Fetcher[Franchise]{
+		clientID:    clientID,
+		accessToken: authResp.AccessToken,
+		url:         "https://api.igdb.com/v4/franchises",
+		limiter:     limiter,
+		ctx:         ctx,
+		logger:      log,
+	}
+	franchisesQuery := "fields id, name, games;"
+	franchises := franchisesFetcher.fetchAll(franchisesQuery, numWorkers, pageLimit)
 
-	// var allGames []Game
-	// for i := range numWorkers {
-	// 	offsetChan <- pageLimit * i
-	// }
+	var wgFile sync.WaitGroup
+	fileMap := map[string]any{
+		"games.json":      games,
+		"genres.json":     genres,
+		"franchises.json": franchises,
+	}
 
-	// for i := range numWorkers {
-	// 	wgGames.Add(1)
-	// 	go func(i int) {
-	// 		defer wgGames.Done()
-	// 		for offset := range offsetChan {
-	// 			limiter.Wait(ctx)
-	// 			query := fmt.Sprintf(`
-	// 				fields name, first_release_date, dlcs, franchises, genres, multiplayer_modes, ports, summary;
-	// 				limit %d;
-	// 				offset %d;
-	// 			`, pageLimit, offset)
+	for filename, value := range fileMap {
+		wgFile.Add(1)
+		go func() {
+			defer wgFile.Done()
+			writeJSON(value, filename, log)
+		}()
+	}
 
-	// 			games, err := fetchQuery(query, clientID, authResp.AccessToken)
-	// 			if err != nil {
-	// 				log.Errorf("Error fetching games with offset %d: %v\n", offset, err)
-	// 				continue
-	// 			}
-
-	// 			gameResults <- games
-
-	// 			log.Infof("Queried games at offset %d, worker %d, at time %s\n", offset, i, time.Now().String())
-
-	// 			if len(games) < pageLimit {
-	// 				log.Infof("Worker %d finished - received partial results (%d < %d)\n", i, len(games), pageLimit)
-	// 				return
-	// 			}
-
-	// 			offsetChan <- offset + pageLimit*numWorkers
-	// 		}
-	// 	}(i)
-	// }
-
-	// go func() {
-	// 	wgGames.Wait()
-	// 	log.Info("All workers finished.")
-	// 	close(offsetChan)
-	// 	close(gameResults)
-	// }()
-
-	// file, err := os.Create("games.json")
-	// if err != nil {
-	// 	log.Errorf("Error creating file: %s", err)
-	// 	return
-	// }
-	// defer file.Close()
-
-	// for r := range gameResults {
-	// 	allGames = append(allGames, r...)
-	// }
-
-	// encoder := json.NewEncoder(file)
-	// encoder.SetIndent("", "  ")
-
-	// if err := encoder.Encode(allGames); err != nil {
-	// 	log.Errorf("Error encoding games to JSON: %s", err)
-	// 	return
-	// }
-
+	wgFile.Wait()
 }
