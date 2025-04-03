@@ -12,8 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/joho/godotenv"
-	"github.com/sirupsen/logrus"
+	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/time/rate"
 )
 
@@ -52,7 +54,7 @@ type Fetcher[T Game | Genre | Franchise] struct {
 	url         string
 	limiter     *rate.Limiter
 	ctx         context.Context
-	logger      *logrus.Logger
+	logger      *log.Logger
 }
 
 func (f *Fetcher[T]) fetchQuery(query string) ([]T, error) {
@@ -79,7 +81,7 @@ func (f *Fetcher[T]) fetchQuery(query string) ([]T, error) {
 
 	var results []T
 	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
-		return nil, fmt.Errorf("Error decoding API response: %s", err)
+		return nil, fmt.Errorf("Error decoding API response: %v", err)
 	}
 
 	return results, nil
@@ -141,24 +143,6 @@ func (f *Fetcher[T]) fetchAll(query string, numWorkers, pageLimit int) []T {
 	return results
 }
 
-func writeJSON(objects any, filepath string, logger *logrus.Logger) error {
-	file, err := os.Create(filepath)
-	if err != nil {
-		return fmt.Errorf("Error creating file: %s", err)
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-
-	if err := encoder.Encode(objects); err != nil {
-		return fmt.Errorf("Error writing objects to JSON: %s", err)
-	}
-
-	logger.Infof("Wrote JSON file at: %s", filepath)
-	return nil
-}
-
 func retrieveAuthToken(clientID, clientSecret string) (*AuthTokenResponse, error) {
 	authResp := new(AuthTokenResponse)
 	res, err := http.Post(fmt.Sprintf("https://id.twitch.tv/oauth2/token?client_id=%s&client_secret=%s&grant_type=client_credentials", clientID, clientSecret), "application/json", nil)
@@ -174,24 +158,51 @@ func retrieveAuthToken(clientID, clientSecret string) (*AuthTokenResponse, error
 	return authResp, nil
 }
 
-func main() {
+var s3Client *s3.Client
 
-	ctx := context.Background()
-	log := logrus.New()
-
-	if err := godotenv.Load(); err != nil {
-		log.Fatal("Error loading .env file")
+func init() {
+	cfg, err := config.LoadDefaultConfig(context.TODO())
+	if err != nil {
+		log.Fatalf("Unable to load SDK config, %v", err)
 	}
+
+	s3Client = s3.NewFromConfig(cfg)
+}
+
+func uploadToS3(ctx context.Context, key string, data []byte) error {
+	bucketName := os.Getenv("S3_BUCKET")
+	if bucketName == "" {
+		return fmt.Errorf("S3_BUCKET variable is required but not set")
+	}
+	_, err := s3Client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: &bucketName,
+		Key:    &key,
+		Body:   bytes.NewReader(data),
+	})
+
+	if err != nil {
+		return fmt.Errorf("Failed to upload data to S3: %v", err)
+	}
+
+	return nil
+}
+
+func fetchAndStoreData(ctx context.Context, logger *log.Logger) error {
 
 	clientID := os.Getenv("CLIENT_ID")
 	clientSecret := os.Getenv("CLIENT_SECRET")
 
-	authResp, err := retrieveAuthToken(clientID, clientSecret)
-	if err != nil {
-		log.Errorf("Error retrieving authentication token: %s", err)
-		log.Exit(1)
+	if clientID == "" || clientSecret == "" {
+		return fmt.Errorf("CLIENT_ID or CLIENT_SECRET variables are required but not set")
 	}
 
+	authResp, err := retrieveAuthToken(clientID, clientSecret)
+	if err != nil {
+		log.Errorf("Error retrieving authentication token: %v", err)
+		return err
+	}
+
+	// IGDB has a request rate limit of 4 req / sec
 	limiter := rate.NewLimiter(4, 1)
 	numWorkers := 3
 	pageLimit := 500
@@ -202,7 +213,7 @@ func main() {
 		url:         "https://api.igdb.com/v4/genres",
 		limiter:     limiter,
 		ctx:         ctx,
-		logger:      log,
+		logger:      logger,
 	}
 	genresQuery := "fields id, name;"
 
@@ -214,7 +225,7 @@ func main() {
 		url:         "https://api.igdb.com/v4/games",
 		limiter:     limiter,
 		ctx:         ctx,
-		logger:      log,
+		logger:      logger,
 	}
 	gamesQuery := "fields id, name, first_release_date, dlcs, franchises, genres, multiplayer_modes, ports, summary;"
 
@@ -226,12 +237,11 @@ func main() {
 		url:         "https://api.igdb.com/v4/franchises",
 		limiter:     limiter,
 		ctx:         ctx,
-		logger:      log,
+		logger:      logger,
 	}
 	franchisesQuery := "fields id, name, games;"
 	franchises := franchisesFetcher.fetchAll(franchisesQuery, numWorkers, pageLimit)
 
-	var wgFile sync.WaitGroup
 	fileMap := map[string]any{
 		"games.json":      games,
 		"genres.json":     genres,
@@ -239,12 +249,44 @@ func main() {
 	}
 
 	for filename, value := range fileMap {
-		wgFile.Add(1)
-		go func() {
-			defer wgFile.Done()
-			writeJSON(value, filename, log)
-		}()
+		data, err := json.MarshalIndent(value, "", "  ")
+		if err != nil {
+			logger.Errorf("Error marshaling JSON for %s: %v", filename, err)
+			continue
+		}
+
+		if err := uploadToS3(ctx, filename, data); err != nil {
+			logger.Errorf("Error uploading %s to S3: %v", filename, err)
+		}
 	}
 
-	wgFile.Wait()
+	return nil
+
+}
+
+func handleRequest(ctx context.Context, event json.RawMessage) error {
+	logger := log.New()
+	logger.SetFormatter(&log.JSONFormatter{})
+
+	if err := fetchAndStoreData(ctx, logger); err != nil {
+		return err
+	}
+	return nil
+
+}
+
+func main() {
+	ctx := context.Background()
+
+	if os.Getenv("AWS_LAMBDA_FUNCTION_NAME") != "" {
+		lambda.Start(handleRequest)
+		return
+	}
+
+	logger := log.New()
+	logger.SetFormatter(&log.JSONFormatter{})
+
+	if err := fetchAndStoreData(ctx, logger); err != nil {
+		logger.Fatalf("Error executing data fetch: %v", err)
+	}
 }
