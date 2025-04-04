@@ -246,3 +246,5 @@ terraform.rc
 lambdas/**/*.json
 lambdas/**/bootstrap
 lambdas/**/*.zip
+lambdas/**/package
+lambdas/**/*.ipynb
