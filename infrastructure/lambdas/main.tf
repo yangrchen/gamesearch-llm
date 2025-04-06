@@ -81,10 +81,11 @@ data "archive_file" "extract_lambda_zip" {
 
 
 resource "aws_s3_object" "upload_extract_lambda_package" {
-  bucket     = aws_s3_bucket.gamesearch_lambda_package_bucket.id
-  key        = "extract/lambda.zip"
-  source     = "${path.root}/lambdas/gamesearch-extract/lambda.zip"
-  depends_on = [data.archive_file.extract_lambda_zip]
+  bucket      = aws_s3_bucket.gamesearch_lambda_package_bucket.id
+  key         = "extract/lambda.zip"
+  source      = data.archive_file.extract_lambda_zip.output_path
+  source_hash = data.archive_file.extract_lambda_zip.output_md5
+  depends_on  = [data.archive_file.extract_lambda_zip]
 }
 
 resource "aws_lambda_function" "extract_lambda" {
@@ -92,7 +93,7 @@ resource "aws_lambda_function" "extract_lambda" {
   # filename      = data.archive_file.extract_lambda_zip.output_path
   role          = aws_iam_role.lambda_exec_role.arn
   s3_bucket     = aws_s3_bucket.gamesearch_lambda_package_bucket.id
-  s3_key        = "extract/lambda.zip"
+  s3_key        = aws_s3_object.upload_extract_lambda_package.key
   handler       = "bootstrap"
   runtime       = "provided.al2023"
   architectures = ["arm64"]
@@ -136,26 +137,32 @@ data "archive_file" "transform_lambda_zip" {
 }
 
 resource "aws_s3_object" "upload_transform_lambda_package" {
-  bucket     = aws_s3_bucket.gamesearch_lambda_package_bucket.id
-  key        = "transform/lambda.zip"
-  source     = "${path.root}/lambdas/gamesearch-transform/lambda.zip"
-  depends_on = [data.archive_file.transform_lambda_zip]
+  bucket      = aws_s3_bucket.gamesearch_lambda_package_bucket.id
+  key         = "transform/lambda.zip"
+  source      = data.archive_file.transform_lambda_zip.output_path
+  source_hash = data.archive_file.transform_lambda_zip.output_md5
+  depends_on  = [data.archive_file.transform_lambda_zip]
 }
 
 resource "aws_lambda_function" "transform_lambda" {
   function_name    = "gamesearch_transform"
   role             = aws_iam_role.lambda_exec_role.arn
   s3_bucket        = aws_s3_bucket.gamesearch_lambda_package_bucket.id
-  s3_key           = "transform/lambda.zip"
+  s3_key           = aws_s3_object.upload_transform_lambda_package.key
   handler          = "lambda_function.lambda_handler"
   runtime          = "python3.12"
-  timeout          = 120
-  memory_size      = 1024
+  timeout          = 420
+  memory_size      = 2048
   source_code_hash = data.archive_file.transform_lambda_zip.output_base64sha256
 
   environment {
     variables = {
-      S3_BUCKET = aws_s3_bucket.gamesearch_data_bucket.id
+      S3_BUCKET          = aws_s3_bucket.gamesearch_data_bucket.id
+      MONGODB_BASE_URI   = var.mongodbatlas_connection_uri_base
+      MONGODB_USER       = var.mongodbatlas_dbuser_user
+      MONGODB_PASSWORD   = var.mongodbatlas_dbuser_password
+      MONGODB_DATABASE   = var.mongodbatlas_database
+      MONGODB_COLLECTION = "games"
     }
   }
 
