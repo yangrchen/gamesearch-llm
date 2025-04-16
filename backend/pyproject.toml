@@ -1,5 +1,5 @@
 [project]
-name = "gamesearch-base"
+name = "backend"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -11,10 +11,11 @@ dependencies = [
     "fastapi[standard]>=0.115.12",
     "langchain-anthropic>=0.3.10",
     "langgraph>=0.3.20",
+    "motor>=3.7.0",
 ]
 
 [project.scripts]
-gamesearch-base = "gamesearch_base.main:main"
+gamesearch-backend = "backend.main:main"
 
 [build-system]
 requires = ["hatchling"]
