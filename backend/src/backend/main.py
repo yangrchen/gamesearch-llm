@@ -3,10 +3,11 @@ import os
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -36,11 +37,8 @@ class GenreService:
             cursor = await self.database["games"].distinct("genres")
             self._genres = list(cursor)
             logger.info(f"Loaded {len(self._genres)} genres")
+
         return self._genres
-
-
-async def get_genre_service() -> GenreService:
-    return app.genre_service
 
 
 @asynccontextmanager
@@ -53,8 +51,7 @@ async def lifespan(app: FastAPI):
 async def init_db_client(app: FastAPI):
     app.mongodb_client = AsyncIOMotorClient(os.environ.get("MONGODB_URI"))
     app.db = app.mongodb_client.get_database("gamesearch")
-    app.genre_service = GenreService(app.db)
-    await app.genre_service.get_genres()
+    app.genres = await GenreService(app.db).get_genres()
 
 
 async def shutdown_db_client(app: FastAPI):
@@ -163,9 +160,14 @@ load_dotenv()
 
 class QueryState(BaseModel):
     query: str
-    query_type: str | None
+    query_type: str | None = None
     genres_list: list[str] = []
-    result: dict[str, Any] | None
+    result: dict[str, Any] | None = None
+
+
+class QueryType(Enum, str):
+    Aggregate = "aggregate"
+    Simple = "simple"
 
 
 def guard_query(state: QueryState):
@@ -218,7 +220,7 @@ def handle_hard_query(state: QueryState):
     try:
         extracted_json = parser.parse(response.content)
         convert_date_strings_to_datetime(extracted_json)
-        logger.info(extracted_json)
+
         return QueryState(
             query=state.query,
             query_type=state.query_type,
@@ -250,24 +252,29 @@ def convert_date_strings_to_datetime(obj: dict | list):
     return obj
 
 
-workflow = StateGraph(QueryState)
+def compile_agent_workflow():
+    workflow = StateGraph(QueryState)
+    workflow.add_node("guard_query", guard_query)
+    workflow.add_node("classify_query", classify_query)
+    workflow.add_node("handle_hard_query", handle_hard_query)
 
-workflow.add_node("guard_query", guard_query)
-workflow.add_node("classify_query", classify_query)
-workflow.add_node("handle_hard_query", handle_hard_query)
+    workflow.add_edge(START, "guard_query")
+    workflow.add_conditional_edges(
+        "guard_query",
+        check_query_type,
+        {"ALLOWED": "classify_query", "NOT_ALLOWED": END},
+    )
+    workflow.add_conditional_edges(
+        "classify_query",
+        check_query_type,
+        {"HARD_QUERY": "handle_hard_query", "SOFT_QUERY": END},
+    )
+    workflow.add_edge("handle_hard_query", END)
 
-workflow.add_edge(START, "guard_query")
-workflow.add_conditional_edges(
-    "guard_query", check_query_type, {"ALLOWED": "classify_query", "NOT_ALLOWED": END}
-)
-workflow.add_conditional_edges(
-    "classify_query",
-    check_query_type,
-    {"HARD_QUERY": "handle_hard_query", "SOFT_QUERY": END},
-)
-workflow.add_edge("handle_hard_query", END)
+    return workflow.compile()
 
-chain = workflow.compile()
+
+chain = compile_agent_workflow()
 
 
 @app.get("/")
@@ -276,13 +283,22 @@ async def health_check():
 
 
 @app.post("/search")
-async def search(
-    user_query: QueryState, genre_service: GenreService = Depends(get_genre_service)
-):
-    genres = await genre_service.get_genres()
-    user_query.genres_list = genres
+async def search(user_query: QueryState):
+    user_query.genres_list = app.genres
     chain_result = chain.invoke(user_query)
-    result = chain_result["result"]
+
+    try:
+        match chain_result["type"]:
+            case QueryType.Aggregate:
+                result = app.db.aggregate(chain_result["query"])
+            case QueryType.Simple:
+                result = app.db.find(chain_result["query"])
+
+    except Exception as e:
+        logger.error(e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error occurred"
+        )
 
     return result
 
