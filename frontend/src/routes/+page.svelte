@@ -1,4 +1,5 @@
 <script lang="ts">
+	import GameCard from '$lib/components/GameCard.svelte';
 	import type { Game } from '$lib/types';
 
 	let searchQuery = $state('');
@@ -26,7 +27,8 @@
 			}
 
 			const data = await response.json();
-			games = data.result;
+			console.log({data})
+			games = data;
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to search games';
 			games = [];
@@ -66,4 +68,7 @@
 			</button>
 		</div>
 	</form>
+	{#each games as game (game._id)}
+		<GameCard {game} />
+	{/each}
 </div>

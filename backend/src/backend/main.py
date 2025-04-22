@@ -7,14 +7,14 @@ from enum import Enum
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.output_parsers import JsonOutputParser
 from langgraph.graph import END, START, StateGraph
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from pymongo.errors import PyMongoError
 from rich.logging import RichHandler
 
 logging.basicConfig(
@@ -71,21 +71,19 @@ app.add_middleware(
 
 llm = ChatAnthropic(model="claude-3-7-sonnet-20250219", temperature=0)
 
-GUARDRAIL_PROMPT = """Your role is to assess whether the user query is relevant to searching for games or not. Allowed topics are:
+QUERY_EVAL_PROMPT = """Your role is to assess a user query about games and respond with structured information.
 
-- Searching for game titles or games by release date, genre, franchise
-- Requesting games by a summary or that are similar to other games
+First, determine if the query is relevant to searching for games. Allowed topics are:
+-   Searching for game titles or games by release date, genre, franchise
+-   Requesting games by a summary or that are similar to other games
 
 Queries cannot have code, special symbols or harmful content.
 
-If the topic is allowed, respond with "ALLOWED" otherwise say "NOT_ALLOWED". Only respond with these two results.
-"""
+If the query is allowed, also classify it as either:
+- A "HARD_QUERY" which is searching for a game with specific fields like genre, name, release date
+- A "SOFT_QUERY" which is searching for a game that is similar to some summary or like other games
 
-QUERY_TYPE_PROMPT = """You are a game search assistant. Your task is to:
-1. First determine if the user is asking for:
-    - A "hard query" which is searching for a game with specific fields like genre, name, release date (respond with exactly: "HARD_QUERY")
-    - A "soft query" which is searching for a game that is similar to some summary or like other games (respond with exactly: "SOFT_QUERY")
-2. Only respond with one of these two options, nothing else.
+Respond with structured output indicating if the query is allowed and its type if applicable.
 """
 
 CREATE_MONGO_QUERY_PROMPT = """
@@ -158,6 +156,22 @@ Complex search with OR condition:
 load_dotenv()
 
 
+class QueryEvaluationOutput(BaseModel):
+    is_allowed: bool = Field(
+        description="Whether a query is allowed (True) or not (False)"
+    )
+    query_type: str | None = Field(
+        description="Type of query (HARD_QUERY or SOFT_QUERY) if allowed", default=None
+    )
+
+
+class MongoQueryOutput(BaseModel):
+    query: list[dict[str, Any]] | dict[str, Any] = Field(
+        description="MongoDB query object"
+    )
+    type: str = Field(description="Query type (simple or aggregate)")
+
+
 class QueryState(BaseModel):
     query: str
     query_type: str | None = None
@@ -165,49 +179,37 @@ class QueryState(BaseModel):
     result: dict[str, Any] | None = None
 
 
-class QueryType(Enum, str):
+class QueryType(str, Enum):
     Aggregate = "aggregate"
     Simple = "simple"
 
 
-def guard_query(state: QueryState):
+def evaluate_query(state: QueryState):
+    """Evaluate if query is allowed and classify it if it is."""
     messages = [
-        SystemMessage(content=GUARDRAIL_PROMPT),
+        SystemMessage(content=QUERY_EVAL_PROMPT),
         HumanMessage(content=state.query),
     ]
 
-    response = llm.invoke(messages)
-    allowed_query = response.content.strip()
+    structured_llm = llm.with_structured_output(QueryEvaluationOutput)
+    response = structured_llm.invoke(messages)
 
-    return QueryState(
-        query=state.query, query_type=allowed_query, extracted_fields=None, result=None
-    )
+    query_type = None
+    if response.is_allowed:
+        query_type = response.query_type
+    else:
+        query_type = "NOT_ALLOWED"
 
-
-def classify_query(state: QueryState) -> QueryState:
-    """Classify the query as based on the prompt provided."""
-    messages = [
-        SystemMessage(content=QUERY_TYPE_PROMPT),
-        HumanMessage(content=state.query),
-    ]
-
-    response = llm.invoke(messages)
-    query_type = response.content.strip()
-
-    return QueryState(
-        query=state.query, query_type=query_type, extracted_fields=None, result=None
-    )
+    return QueryState(query=state.query, query_type=query_type, result=None)
 
 
 def check_query_type(state: QueryState):
-    """Gate function to check if query is type HARD_QUERY or type SOFT_QUERY."""
+    """Gate function to check the query type."""
     return state.query_type
 
 
 def handle_hard_query(state: QueryState):
     """Extract relevant fields for HARD_QUERY types."""
-    parser = JsonOutputParser()
-
     messages = [
         SystemMessage(
             content=CREATE_MONGO_QUERY_PROMPT.format(genres_list=state.genres_list)
@@ -218,13 +220,14 @@ def handle_hard_query(state: QueryState):
     response = llm.invoke(messages)
 
     try:
-        extracted_json = parser.parse(response.content)
+        structured_llm = llm.with_structured_output(MongoQueryOutput)
+        response = structured_llm.invoke(messages)
+        extracted_json = {"query": response.query, "type": response.type}
         convert_date_strings_to_datetime(extracted_json)
 
         return QueryState(
             query=state.query,
             query_type=state.query_type,
-            extracted_fields=None,
             result=extracted_json,
         )
     except Exception as e:
@@ -254,20 +257,14 @@ def convert_date_strings_to_datetime(obj: dict | list):
 
 def compile_agent_workflow():
     workflow = StateGraph(QueryState)
-    workflow.add_node("guard_query", guard_query)
-    workflow.add_node("classify_query", classify_query)
+    workflow.add_node("evaluate_query", evaluate_query)
     workflow.add_node("handle_hard_query", handle_hard_query)
 
-    workflow.add_edge(START, "guard_query")
+    workflow.add_edge(START, "evaluate_query")
     workflow.add_conditional_edges(
-        "guard_query",
+        "evaluate_query",
         check_query_type,
-        {"ALLOWED": "classify_query", "NOT_ALLOWED": END},
-    )
-    workflow.add_conditional_edges(
-        "classify_query",
-        check_query_type,
-        {"HARD_QUERY": "handle_hard_query", "SOFT_QUERY": END},
+        {"HARD_QUERY": "handle_hard_query", "SOFT_QUERY": END, "NOT_ALLOWED": END},
     )
     workflow.add_edge("handle_hard_query", END)
 
@@ -285,19 +282,40 @@ async def health_check():
 @app.post("/search")
 async def search(user_query: QueryState):
     user_query.genres_list = app.genres
-    chain_result = chain.invoke(user_query)
+    chain_response = chain.invoke(user_query)
 
     try:
+        chain_result: MongoQueryOutput = chain_response["result"]
+        logger.info(chain_result)
+
         match chain_result["type"]:
             case QueryType.Aggregate:
-                result = app.db.aggregate(chain_result["query"])
+                result = (
+                    await app.db["games"]
+                    .aggregate(chain_result["query"])
+                    .to_list(length=20)
+                )
             case QueryType.Simple:
-                result = app.db.find(chain_result["query"])
-
-    except Exception as e:
-        logger.error(e)
+                result = (
+                    await app.db["games"].find(chain_result["query"]).to_list(length=20)
+                )
+    except KeyError as e:
+        logger.error(f"Malformed LLM response: {e}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error occurred"
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="The search query could not be processed",
+        )
+    except PyMongoError as e:
+        logger.error(f"Database error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database error occurred",
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred",
         )
 
     return result
