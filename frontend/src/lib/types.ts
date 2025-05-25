@@ -10,6 +10,7 @@ export interface Game {
 
 export interface SearchQuery {
     query: string;
+    use_vector_search: boolean
 }
 
 export interface SearchResponse {
