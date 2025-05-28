@@ -48,7 +48,15 @@ type Franchise struct {
 	Games []int  `json:"games"`
 }
 
-type Fetcher[T Game | Genre | Franchise] struct {
+type Cover struct {
+	ID     int    `json:"id"`
+	Game   int    `json:"game"`
+	Height int    `json:"height"`
+	Width  int    `json:"width"`
+	URL    string `json:"url"`
+}
+
+type Fetcher[T Game | Genre | Franchise | Cover] struct {
 	clientID    string
 	accessToken string
 	url         string
@@ -242,10 +250,22 @@ func fetchAndStoreData(ctx context.Context, logger *log.Logger) error {
 	franchisesQuery := "fields id, name, games;"
 	franchises := franchisesFetcher.fetchAll(franchisesQuery, numWorkers, pageLimit)
 
+	coversFetcher := Fetcher[Cover]{
+		clientID:    clientID,
+		accessToken: authResp.AccessToken,
+		url:         "https://api.igdb.com/v4/covers",
+		limiter:     limiter,
+		ctx:         ctx,
+		logger:      logger,
+	}
+	coversQuery := "fields id, game, height, width, url"
+	covers := coversFetcher.fetchAll(coversQuery, numWorkers, pageLimit)
+
 	fileMap := map[string]any{
 		"games.json":      games,
 		"genres.json":     genres,
 		"franchises.json": franchises,
+		"covers.json":     covers,
 	}
 
 	for filename, value := range fileMap {
