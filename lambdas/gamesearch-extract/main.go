@@ -111,7 +111,10 @@ func (f *Fetcher[T]) fetchAll(query string, numWorkers, pageLimit int) []T {
 		go func(i int) {
 			defer wg.Done()
 			for offset := range offsetChan {
-				f.limiter.Wait(f.ctx)
+				if err := f.limiter.Wait(f.ctx); err != nil {
+					f.logger.Errorf("Error rate limiting requests: %v", err)
+					return
+				}
 
 				var builder strings.Builder
 				builder.WriteString(query)
@@ -206,12 +209,12 @@ func fetchAndStoreData(ctx context.Context, logger *log.Logger) error {
 
 	authResp, err := retrieveAuthToken(clientID, clientSecret)
 	if err != nil {
-		log.Errorf("Error retrieving authentication token: %v", err)
+		logger.Errorf("Error retrieving authentication token: %v", err)
 		return err
 	}
 
 	// IGDB has a request rate limit of 4 req / sec
-	limiter := rate.NewLimiter(4, 1)
+	limiter := rate.NewLimiter(3, 1)
 	numWorkers := 3
 	pageLimit := 500
 
@@ -225,6 +228,7 @@ func fetchAndStoreData(ctx context.Context, logger *log.Logger) error {
 	}
 	genresQuery := "fields id, name;"
 
+	logger.Info("Fetching genres data...")
 	genres := genresFetcher.fetchAll(genresQuery, numWorkers, pageLimit)
 
 	gamesFetcher := Fetcher[Game]{
@@ -237,6 +241,7 @@ func fetchAndStoreData(ctx context.Context, logger *log.Logger) error {
 	}
 	gamesQuery := "fields id, name, first_release_date, dlcs, franchises, genres, multiplayer_modes, ports, summary;"
 
+	logger.Info("Fetching games data...")
 	games := gamesFetcher.fetchAll(gamesQuery, numWorkers, pageLimit)
 
 	franchisesFetcher := Fetcher[Franchise]{
@@ -248,6 +253,8 @@ func fetchAndStoreData(ctx context.Context, logger *log.Logger) error {
 		logger:      logger,
 	}
 	franchisesQuery := "fields id, name, games;"
+
+	logger.Info("Fetching franchises data...")
 	franchises := franchisesFetcher.fetchAll(franchisesQuery, numWorkers, pageLimit)
 
 	coversFetcher := Fetcher[Cover]{
@@ -258,7 +265,9 @@ func fetchAndStoreData(ctx context.Context, logger *log.Logger) error {
 		ctx:         ctx,
 		logger:      logger,
 	}
-	coversQuery := "fields id, game, height, width, url"
+	coversQuery := "fields id, game, height, width, url;"
+
+	logger.Info("Fetching covers data...")
 	covers := coversFetcher.fetchAll(coversQuery, numWorkers, pageLimit)
 
 	fileMap := map[string]any{
