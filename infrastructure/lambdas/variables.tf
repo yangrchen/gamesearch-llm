@@ -47,3 +47,9 @@ variable "mongodbatlas_dbuser_password" {
   type        = string
   sensitive   = true
 }
+
+variable "voyageai_api_key" {
+  description = "API key for Voyage AI embedding service"
+  type        = string
+  sensitive   = true
+}

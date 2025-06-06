@@ -1,3 +1,13 @@
+terraform {
+  backend "s3" {
+    bucket       = "gamesearch-terraform-state"
+    key          = "terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}
+
 module "lambdas" {
   source = "./infrastructure/lambdas"
 
@@ -11,6 +21,7 @@ module "lambdas" {
   mongodbatlas_database            = var.mongodbatlas_database
   mongodbatlas_dbuser_user         = var.mongodbatlas_dbuser_user
   mongodbatlas_dbuser_password     = var.mongodbatlas_dbuser_password
+  voyageai_api_key                 = var.voyageai_api_key
 }
 
 module "mongodb" {

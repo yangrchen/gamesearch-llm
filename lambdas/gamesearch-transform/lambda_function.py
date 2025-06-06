@@ -12,8 +12,8 @@ import boto3
 import polars as pl
 import pymongo
 import s3fs
+import voyageai
 from pymongo.errors import PyMongoError
-from voyageai.client import Client
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -25,7 +25,7 @@ class EmbeddingService:
     """Embedding service using Voyage AI."""
 
     def __init__(self, api_key: str):
-        self.client = Client(api_key=api_key)
+        self.client = voyageai.Client(api_key=api_key)
 
     def generate_embeddings(
         self,
@@ -102,7 +102,7 @@ def create_searchable_text(
             else:
                 exprs.append(pl.concat_str(pl.lit(f"{col_name}: "), pl.col(col_name)))
 
-    return text_df.with_columns(pl.concat_str(exprs, separator=" | "))
+    return text_df.with_columns(searchable_text=pl.concat_str(exprs, separator=" | "))
 
 
 def read_json_from_s3(bucket: str, key: str) -> pl.DataFrame:
@@ -163,14 +163,14 @@ def connect_to_mongodb() -> pymongo.MongoClient:
 
 def lambda_handler(event, context):
     bucket_name = get_required_env("S3_BUCKET")
-    voyage_api_key = get_required_env("VOYAGE_API_KEY")
+    voyageai_api_key = get_required_env("VOYAGEAI_API_KEY")
     mongodb_database = os.environ.get("MONGODB_DATABASE", "gamesearch")
     mongodb_collection = os.environ.get("MONGODB_COLLECTION", "games")
     batch_size: int = int(os.environ.get("BATCH_SIZE", 1000))
 
     try:
         # Initialize embeddings service
-        embedding_service = EmbeddingService(api_key=voyage_api_key)
+        embedding_service = EmbeddingService(api_key=voyageai_api_key)
 
         # Connect to MongoDB games collection
         mongodb_client = connect_to_mongodb()
@@ -264,3 +264,7 @@ def lambda_handler(event, context):
     except Exception:
         logger.exception("Error processing game data")
         raise
+
+
+if __name__ == "__main__":
+    lambda_handler(None, None)

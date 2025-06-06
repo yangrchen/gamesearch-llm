@@ -118,6 +118,7 @@ resource "aws_lambda_function" "transform_lambda" {
       MONGODB_PASSWORD   = var.mongodbatlas_dbuser_password
       MONGODB_DATABASE   = var.mongodbatlas_database
       MONGODB_COLLECTION = "games"
+      VOYAGEAI_API_KEY   = var.voyageai_api_key
     }
   }
 }
