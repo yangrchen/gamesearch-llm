@@ -1,6 +1,6 @@
 [project]
 name = "backend"
-version = "0.1.0"
+version = "0.2.0"
 description = "Add your description here"
 readme = "README.md"
 authors = [
@@ -12,6 +12,7 @@ dependencies = [
     "langchain-anthropic>=0.3.10",
     "langgraph>=0.3.20",
     "motor>=3.7.0",
+    "voyageai>=0.3.2",
 ]
 
 [project.scripts]

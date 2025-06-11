@@ -15,21 +15,13 @@ data "mongodbatlas_project" "gamesearch_project" {
   name = "Gamesearch API"
 }
 
-resource "mongodbatlas_advanced_cluster" "gamesearch_cluster" {
-  project_id   = data.mongodbatlas_project.gamesearch_project.id
-  name         = "gamesearch-cluster"
-  cluster_type = "REPLICASET"
+resource "mongodbatlas_flex_cluster" "gamesearch_cluster" {
+  project_id = data.mongodbatlas_project.gamesearch_project.id
+  name       = "gamesearch-cluster"
 
-  replication_specs {
-    region_configs {
-      electable_specs {
-        instance_size = "M0"
-      }
-      provider_name         = "TENANT"
-      backing_provider_name = "AWS"
-      region_name           = "US_EAST_1"
-      priority              = 7
-    }
+  provider_settings = {
+    backing_provider_name = "AWS"
+    region_name           = "US_EAST_1"
   }
 }
 
@@ -52,6 +44,6 @@ resource "mongodbatlas_project_ip_access_list" "gamesearch_ip_list" {
 }
 
 output "mongodbatlas_connection_uri_base" {
-  value     = mongodbatlas_advanced_cluster.gamesearch_cluster.connection_strings[0].standard_srv
+  value     = mongodbatlas_flex_cluster.gamesearch_cluster.connection_strings.standard_srv
   sensitive = true
 }

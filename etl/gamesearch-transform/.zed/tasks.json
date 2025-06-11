@@ -1,0 +1,9 @@
+[
+    {
+        "label": "Run with uv",
+        "command": "uv run",
+        "args": ["$ZED_FILE"],
+        "use_new_terminal": false,
+        "reveal": "always"
+    }
+]
