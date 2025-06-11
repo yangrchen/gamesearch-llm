@@ -22,6 +22,7 @@
 
 	async function searchGames() {
 		if (searchDisabled) return;
+		games = [];
 		loading = true;
 
 		try {
@@ -38,8 +39,8 @@
 			}
 
 			const data = await response.json();
-			console.log({ data });
-			games = data;
+			console.log(data.result);
+			games = data.result;
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to search games';
 			games = [];
@@ -201,7 +202,7 @@
 			{/if}
 
 			<!-- Error Display -->
-			{#if error}
+			{#if error && !loading}
 				<div class="mb-6 rounded-lg border border-red-500/20 bg-red-500/10 p-4">
 					<div class="flex items-center gap-3 text-red-400">
 						<span class="icon-[material-symbols--error-outline] text-xl"></span>

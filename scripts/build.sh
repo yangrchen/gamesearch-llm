@@ -18,17 +18,17 @@ aws ecr get-login-password --region ${REGION} | docker login --username AWS --pa
 
 # Build and push extract lambda
 echo "Building extract lambda..."
-cd lambdas/gamesearch-extract
+cd etl/gamesearch-extract
 docker build --platform linux/amd64 --provenance false -t ${ECR_URI}:extract-${EXTRACT_TAG} .
 echo "Pushing extract lambda..."
 docker push ${ECR_URI}:extract-${EXTRACT_TAG}
 cd ../..
 
-# Build and push transform lambda
-echo "Building transform lambda..."
-cd lambdas/gamesearch-transform
+# Build and push transform container
+echo "Building transform container for ECS Fargate..."
+cd etl/gamesearch-transform
 docker build --platform linux/amd64 --provenance false -t ${ECR_URI}:transform-${TRANSFORM_TAG} .
-echo "Pushing transform lambda..."
+echo "Pushing transform container..."
 docker push ${ECR_URI}:transform-${TRANSFORM_TAG}
 cd ../..
 

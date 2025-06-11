@@ -8,8 +8,8 @@ terraform {
   }
 }
 
-module "lambdas" {
-  source = "./infrastructure/lambdas"
+module "etl" {
+  source = "./infrastructure/etl"
 
   aws_region                    = var.aws_region
   s3_data_bucket_name           = var.s3_data_bucket_name

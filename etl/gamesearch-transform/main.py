@@ -4,7 +4,9 @@ import datetime
 import io
 import json
 import logging
+import math
 import os
+import sys
 import urllib
 import urllib.parse
 
@@ -15,8 +17,12 @@ import s3fs
 import voyageai
 from pymongo.errors import PyMongoError
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger(__name__)
 
 s3 = boto3.client("s3")
 
@@ -24,7 +30,8 @@ s3 = boto3.client("s3")
 class EmbeddingService:
     """Embedding service using Voyage AI."""
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str) -> None:
+        """Initialize service with Voyage AI client."""
         self.client = voyageai.Client(api_key=api_key)
 
     def generate_embeddings(
@@ -75,32 +82,29 @@ def get_required_env(var: str) -> str:
 
 def create_searchable_text(
     text_df: pl.DataFrame,
-    columns: list[str] | None = None,
+    columns: list[str],
 ) -> pl.DataFrame:
     """Create a comprehensive text representation of game data for embeddings."""
     exprs = []
-    if columns:
-        for col_name in columns:
-            if isinstance(text_df.schema[col_name], pl.List):
-                exprs.append(
-                    pl.concat_str(
-                        pl.lit(f"{col_name}: "),
-                        pl.col(col_name).list.join(", "),
-                    ),
-                )
-            else:
-                exprs.append(pl.concat_str(pl.lit(f"{col_name}: "), pl.col(col_name)))
-    else:
-        for col_name in text_df.columns:
-            if isinstance(text_df.schema[col_name], pl.List):
-                exprs.append(
-                    pl.concat_str(
-                        pl.lit(f"{col_name}: "),
-                        pl.col(col_name).list.join(", "),
-                    ),
-                )
-            else:
-                exprs.append(pl.concat_str(pl.lit(f"{col_name}: "), pl.col(col_name)))
+    for c in columns:
+        if isinstance(text_df.schema[c], pl.List):
+            exprs.append(
+                pl.concat_str(
+                    pl.lit(f"{c}: "),
+                    pl.when(pl.col(c).is_not_null())
+                    .then(pl.col(c).list.join(", "))
+                    .otherwise(pl.lit("None")),
+                ),
+            )
+        else:
+            exprs.append(
+                pl.concat_str(
+                    pl.lit(f"{c}: "),
+                    pl.when(pl.col(c).is_not_null())
+                    .then(pl.col(c))
+                    .otherwise(pl.lit("None")),
+                ),
+            )
 
     return text_df.with_columns(searchable_text=pl.concat_str(exprs, separator=" | "))
 
@@ -161,14 +165,19 @@ def connect_to_mongodb() -> pymongo.MongoClient:
         return client
 
 
-def lambda_handler(event, context):
-    bucket_name = get_required_env("S3_BUCKET")
-    voyageai_api_key = get_required_env("VOYAGEAI_API_KEY")
-    mongodb_database = os.environ.get("MONGODB_DATABASE", "gamesearch")
-    mongodb_collection = os.environ.get("MONGODB_COLLECTION", "games")
-    batch_size: int = int(os.environ.get("BATCH_SIZE", 1000))
-
+def main():
     try:
+        # Get environment variables
+        bucket_name = get_required_env("S3_BUCKET")
+        voyageai_api_key = get_required_env("VOYAGEAI_API_KEY")
+        mongodb_database = os.environ.get("MONGODB_DATABASE", "gamesearch")
+        mongodb_collection = os.environ.get("MONGODB_COLLECTION", "games")
+        batch_size: int = int(os.environ.get("BATCH_SIZE", 1000))
+
+        logger.info("Starting data transformation process...")
+        logger.info("S3 bucket: %s", bucket_name)
+        logger.info("Batch size: %s", batch_size)
+
         # Initialize embeddings service
         embedding_service = EmbeddingService(api_key=voyageai_api_key)
 
@@ -202,9 +211,6 @@ def lambda_handler(event, context):
         )
         franchises_map = dict(zip(franchises_map["id"], franchises_map["name"]))
 
-        # Process games data with mappings
-        games_df = games_df.with_columns(summary=pl.col("summary").str.to_lowercase())
-
         current_time = datetime.datetime.now(datetime.UTC)
 
         games_df = games_df.with_columns(
@@ -232,39 +238,35 @@ def lambda_handler(event, context):
             columns=["name", "franchises", "genres", "summary"],
         )
 
+        games_collection.delete_many({})
+
         # Create batched vector embeddings
-        embedding_frames = []
-        for frame in games_df.iter_slices(n_rows=batch_size):
+        for i, frame in enumerate(games_df.iter_slices(n_rows=batch_size), start=1):
             texts = frame.get_column("searchable_text").to_list()
             embed = embedding_service.generate_embeddings(texts)
-            frame = frame.with_columns(pl.Series("text_embeddings", embed))
-            embedding_frames.append(frame)
-
-        games_df = pl.concat(embedding_frames)
-        games_dicts = games_df.to_dicts()
-
-        games_collection.delete_many({})
-        games_collection.insert_many(games_dicts, ordered=False)
+            frame = frame.with_columns(pl.Series("text_embeddings", embed)).to_dicts()
+            games_collection.insert_many(frame, ordered=False)
+            logger.info(
+                "Embedded and inserted batch %d / %d",
+                i,
+                math.ceil(games_df.height / batch_size),
+            )
 
         logger.info(
-            "Finished processing game data and wrote to S3 and MongoDB database",
+            "Successfully completed data transformation and insertion",
         )
-
-        return {
-            "statusCode": 200,
-            "body": json.dumps(
-                {
-                    "message": "Game data processed successfully",
-                    "games_count": games_df.height,
-                    "mongodb_status": "Data inserted successfully",
-                },
-            ),
+        result = {
+            "status": "success",
+            "message": "Game data processed successfully",
+            "games_count": games_df.height,
         }
+        logger.info(json.dumps(result, indent=2))
+        sys.exit(0)
 
     except Exception:
         logger.exception("Error processing game data")
-        raise
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    lambda_handler(None, None)
+    main()
