@@ -1,12 +1,17 @@
 <script lang="ts">
 	import GameCard from '$lib/components/GameCard.svelte';
-	import type { Game } from '$lib/types';
+	import Pagination from '$lib/components/Pagination.svelte';
+	import PageSizeSelector from '$lib/components/PageSizeSelector.svelte';
+	import type { Game, SearchResponse } from '$lib/types';
 
 	let searchQuery = $state('');
 	let games = $state<Game[]>([]);
 	let loading = $state(false);
 	let error = $state<string | null>(null);
 	let useVectorSearch = $state(false);
+	let searchResponse = $state<SearchResponse | null>(null);
+	let currentPage = $state(1);
+	let pageSize = $state(12);
 
 	let searchDisabled = $derived(loading || searchQuery.trim() === '');
 
@@ -22,8 +27,10 @@
 
 	async function searchGames() {
 		if (searchDisabled) return;
+		currentPage = 1;
 		games = [];
 		loading = true;
+		error = null;
 
 		try {
 			const response = await fetch('/api/search', {
@@ -31,21 +38,98 @@
 				headers: {
 					'Content-Type': 'application/json'
 				},
-				body: JSON.stringify({ query: searchQuery, use_vector_search: useVectorSearch })
+				body: JSON.stringify({
+					query: searchQuery,
+					use_vector_search: useVectorSearch,
+					page: currentPage,
+					page_size: pageSize
+				})
 			});
 
 			if (!response.ok) {
 				throw new Error(`Search failed with status: ${response.status}`);
 			}
 
-			const data = await response.json();
-			console.log(data.result);
+			const data: SearchResponse = await response.json();
+
+			// Check for backend errors
+			if (data.error) {
+				throw new Error(data.error);
+			}
+
+			// Check if query was blocked
+			if (data.evaluation_output && !data.evaluation_output.is_allowed) {
+				throw new Error(data.evaluation_output.violation_reason || 'Query not allowed');
+			}
+
+			console.log('Search response:', data);
+			searchResponse = data;
 			games = data.result;
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to search games';
 			games = [];
+			searchResponse = null;
 		} finally {
 			loading = false;
+		}
+	}
+
+	async function changePage(page: number) {
+		if (!searchResponse || loading) return;
+
+		currentPage = page;
+		loading = true;
+		error = null;
+
+		try {
+			const requestBody = {
+				query: searchQuery,
+				page: page,
+				page_size: pageSize,
+				use_vector_search: searchResponse.use_vector_search,
+				...(searchResponse.use_vector_search
+					? { vector_embedding: searchResponse.vector_embedding }
+					: {
+							processed_output: searchResponse.processed_output
+						})
+			};
+
+			const response = await fetch('/api/search', {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify(requestBody)
+			});
+
+			if (!response.ok) {
+				throw new Error(`Pagination failed with status: ${response.status}`);
+			}
+
+			const data: SearchResponse = await response.json();
+
+			if (data.error) {
+				throw new Error(data.error);
+			}
+
+			console.log('Pagination response:', data);
+			games = data.result;
+			searchResponse = { ...searchResponse, ...data };
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to load page';
+			currentPage = searchResponse.page; // Reset to previous page
+		} finally {
+			loading = false;
+		}
+	}
+
+	function handlePageSizeChange(newPageSize: number) {
+		if (loading) return;
+
+		pageSize = newPageSize;
+		// If we have search results, restart the search with the new page size
+		if (searchResponse) {
+			changePage(currentPage);
 		}
 	}
 
@@ -77,10 +161,23 @@
 					🎮 Gamesearch
 				</h1>
 				<div class="text-sm text-slate-400">
-					Powered by AI • {games.length} results •
+					Powered by AI •
+					{#if searchResponse}
+						Page {searchResponse.page} • {games.length} results •
+					{:else}
+						{games.length} results •
+					{/if}
 					<span class={useVectorSearch ? 'text-pink-400' : 'text-purple-400'}>
 						{useVectorSearch ? 'AI Search' : 'Structured Search'}
 					</span>
+					{#if searchResponse && searchResponse.page > 1}
+						<span
+							class="ml-2 inline-flex items-center gap-1 rounded-full bg-green-500/20 px-2 py-1 text-xs font-medium text-green-400"
+						>
+							<span class="icon-[material-symbols--bolt] text-xs"></span>
+							Fast pagination
+						</span>
+					{/if}
 				</div>
 			</div>
 		</div>
@@ -147,38 +244,55 @@
 			</form>
 
 			<!-- Search Type Toggle -->
-			<div class="mb-6 flex items-center justify-center gap-2">
-				<div
-					class="flex rounded-lg border border-slate-700/50 bg-slate-800/50 p-1 backdrop-blur-sm"
-				>
-					<button
-						type="button"
-						onclick={() => (useVectorSearch = false)}
-						aria-pressed={!useVectorSearch}
-						aria-label="Use structured search"
-						class={`flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-all duration-200 ${
-							!useVectorSearch
-								? 'bg-gradient-to-r from-purple-600 to-purple-500 text-white shadow-lg shadow-purple-500/25'
-								: 'text-slate-400 hover:bg-slate-700/30 hover:text-slate-300'
-						}`}
+			<div class="mb-6">
+				<div class="mb-3 flex items-center justify-center gap-2">
+					<div
+						class="flex rounded-lg border border-slate-700/50 bg-slate-800/50 p-1 backdrop-blur-sm"
 					>
-						<span class="icon-[material-symbols--database-outline] text-lg"></span>
-						Structured Search
-					</button>
-					<button
-						type="button"
-						onclick={() => (useVectorSearch = true)}
-						aria-pressed={useVectorSearch}
-						aria-label="Use AI similarity search"
-						class={`flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-all duration-200 ${
-							useVectorSearch
-								? 'bg-gradient-to-r from-pink-600 to-pink-500 text-white shadow-lg shadow-pink-500/25'
-								: 'text-slate-400 hover:bg-slate-700/30 hover:text-slate-300'
-						}`}
-					>
-						<span class="icon-[material-symbols--auto-awesome] text-lg"></span>
-						AI Similarity Search
-					</button>
+						<button
+							type="button"
+							onclick={() => (useVectorSearch = false)}
+							aria-pressed={!useVectorSearch}
+							aria-label="Use structured search"
+							class={`flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-all duration-200 ${
+								!useVectorSearch
+									? 'bg-gradient-to-r from-purple-600 to-purple-500 text-white shadow-lg shadow-purple-500/25'
+									: 'text-slate-400 hover:bg-slate-700/30 hover:text-slate-300'
+							}`}
+						>
+							<span class="icon-[material-symbols--database-outline] text-lg"></span>
+							Structured Search
+						</button>
+						<button
+							type="button"
+							onclick={() => (useVectorSearch = true)}
+							aria-pressed={useVectorSearch}
+							aria-label="Use AI similarity search"
+							class={`flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-all duration-200 ${
+								useVectorSearch
+									? 'bg-gradient-to-r from-pink-600 to-pink-500 text-white shadow-lg shadow-pink-500/25'
+									: 'text-slate-400 hover:bg-slate-700/30 hover:text-slate-300'
+							}`}
+						>
+							<span class="icon-[material-symbols--auto-awesome] text-lg"></span>
+							AI Similarity Search
+						</button>
+					</div>
+				</div>
+
+				<!-- Search Type Description -->
+				<div class="text-center text-sm text-slate-400">
+					{#if useVectorSearch}
+						<div class="flex items-center justify-center gap-2">
+							<span class="icon-[material-symbols--psychology] text-pink-400"></span>
+							<span>AI will find games with similar themes, gameplay, or concepts</span>
+						</div>
+					{:else}
+						<div class="flex items-center justify-center gap-2">
+							<span class="icon-[material-symbols--filter-list] text-purple-400"></span>
+							<span>AI will create precise database queries based on your criteria</span>
+						</div>
+					{/if}
 				</div>
 			</div>
 
@@ -218,17 +332,84 @@
 		<!-- Results Section -->
 		{#if games.length > 0}
 			<div class="mx-auto max-w-6xl">
-				<div class="mb-6 flex items-center justify-between">
-					<h3 class="text-xl font-semibold text-white">Search Results</h3>
-					<div class="text-sm text-slate-400">
-						{games.length} game{games.length !== 1 ? 's' : ''} found
+				<div class="mb-6">
+					<div class="mb-3 flex items-center justify-between">
+						<div>
+							<h3 class="text-xl font-semibold text-white">Search Results</h3>
+							<div class="mt-1 text-sm text-slate-400">
+								{#if searchResponse}
+									Page {searchResponse.page} • {games.length} game{games.length !== 1 ? 's' : ''} shown
+									{#if searchResponse.has_next_page}
+										• More available
+									{/if}
+								{:else}
+									{games.length} game{games.length !== 1 ? 's' : ''} found
+								{/if}
+							</div>
+						</div>
+
+						<div class="flex items-center gap-4">
+							{#if searchResponse && searchResponse.page > 1}
+								<div class="flex items-center gap-2 text-xs text-green-400">
+									<span class="icon-[material-symbols--speed] text-sm"></span>
+									<span>Optimized pagination active</span>
+								</div>
+							{/if}
+							<PageSizeSelector
+								{pageSize}
+								onPageSizeChange={handlePageSizeChange}
+								disabled={loading}
+							/>
+						</div>
 					</div>
+
+					<!-- Search Context Info -->
+					{#if searchResponse}
+						<div class="rounded-lg border border-slate-700/30 bg-slate-800/20 p-3">
+							<div class="flex items-center justify-between text-sm">
+								<div class="flex items-center gap-4">
+									<div class="flex items-center gap-2">
+										<span class="icon-[material-symbols--search] text-slate-400"></span>
+										<span class="text-slate-300">"{searchQuery}"</span>
+									</div>
+									<div class="flex items-center gap-2">
+										{#if searchResponse.use_vector_search}
+											<span class="icon-[material-symbols--psychology] text-pink-400"></span>
+											<span class="text-pink-300">AI Similarity Search</span>
+										{:else}
+											<span class="icon-[material-symbols--filter-list] text-purple-400"></span>
+											<span class="text-purple-300">Structured Search</span>
+										{/if}
+									</div>
+								</div>
+								{#if searchResponse.page > 1}
+									<div class="flex items-center gap-2 text-green-400">
+										<span class="icon-[material-symbols--bolt] text-sm"></span>
+										<span class="text-xs">Fast pagination (no AI re-processing)</span>
+									</div>
+								{/if}
+							</div>
+						</div>
+					{/if}
 				</div>
 
-				<div class="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-					{#each games as game (game._id)}
-						<GameCard {game} />
-					{/each}
+				<div class="relative">
+					<div class="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+						{#each games as game (game._id)}
+							<GameCard {game} />
+						{/each}
+					</div>
+
+					<!-- Pagination -->
+					{#if searchResponse}
+						<Pagination
+							currentPage={searchResponse.page}
+							hasNextPage={searchResponse.has_next_page}
+							pageSize={searchResponse.page_size}
+							onPageChange={changePage}
+							{loading}
+						/>
+					{/if}
 				</div>
 			</div>
 		{/if}
@@ -236,9 +417,34 @@
 		<!-- Loading State -->
 		{#if loading}
 			<div class="mx-auto max-w-6xl">
+				<!-- Loading Message -->
+				<div class="mb-6 text-center">
+					<div
+						class="inline-flex items-center gap-3 rounded-lg bg-slate-800/50 px-4 py-3 text-white backdrop-blur-sm"
+					>
+						<div
+							class="h-4 w-4 animate-spin rounded-full border-2 border-white/20 border-t-white"
+						></div>
+						<span class="text-sm font-medium">
+							{#if currentPage === 1}
+								{#if useVectorSearch}
+									AI is analyzing your query and finding similar games...
+								{:else}
+									AI is processing your query and building database filters...
+								{/if}
+							{:else}
+								Loading page {currentPage} using optimized pagination...
+							{/if}
+						</span>
+					</div>
+				</div>
+
 				<div class="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-					{#each Array(6) as _}
-						<div class="animate-pulse rounded-xl bg-slate-800/30 p-6">
+					{#each Array(pageSize) as _, i}
+						<div
+							class="animate-pulse rounded-xl bg-slate-800/30 p-6"
+							style="animation-delay: {i * 100}ms"
+						>
 							<div class="mb-4 h-6 rounded bg-slate-700/50"></div>
 							<div class="mb-2 h-4 rounded bg-slate-700/30"></div>
 							<div class="mb-2 h-4 w-3/4 rounded bg-slate-700/30"></div>

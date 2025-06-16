@@ -1,7 +1,14 @@
 <script lang="ts">
 	import type { Game } from '$lib/types';
+	import GameModal from './GameModal.svelte';
 
 	let { game }: { game: Game } = $props();
+
+	let isModalOpen = $state(false);
+
+	function openModal() {
+		isModalOpen = true;
+	}
 
 	function truncateSummary(summary: string, maxLength = 150): string {
 		if (!summary || summary.length <= maxLength) return summary || 'No description available';
@@ -91,6 +98,7 @@
 			</div>
 
 			<button
+				onclick={openModal}
 				class="group/btn flex items-center gap-2 rounded-lg bg-purple-600/20 px-3 py-2 text-xs font-medium text-purple-300 transition-all duration-200 hover:bg-purple-600/30 hover:text-purple-200"
 			>
 				<span>View Details</span>
@@ -101,3 +109,6 @@
 		</div>
 	</div>
 </div>
+
+<!-- Game Details Modal -->
+<GameModal {game} bind:isOpen={isModalOpen} />

@@ -1,12 +1,14 @@
+"""Main driver for agent execution and interacting with the games database."""
+
 from __future__ import annotations
 
+import datetime
 import logging
 import os
 import re
 from contextlib import asynccontextmanager
-from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import voyageai
 from dotenv import load_dotenv
@@ -16,9 +18,15 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pymongo.errors import PyMongoError
 from rich.logging import RichHandler
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
+    from langgraph.graph.graph import CompiledGraph
+    from motor.motor_asyncio import AsyncIOMotorDatabase
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,28 +35,81 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-CACHE_TTL: int | str = os.getenv("CACHE_TTL", 3000)
+CACHE_TTL = int(os.getenv("CACHE_TTL", "3000"))
 
 
 class GenreService:
-    def __init__(self, database):
-        self.database = database
+    """Genre service to retrieve existing game genres.
+
+    This service manages the retrieval and caching of game genres from
+    the MongoDB database.
+
+    Attributes
+    ----------
+    database : motor.motor_asyncio.AsyncIOMotorDatabase
+        MongoDB database connection
+    _genres : list[str] or None
+        Cached list of game genres
+
+    """
+
+    def __init__(self, db: AsyncIOMotorDatabase) -> None:
+        """Initialize service with MongoDB connection.
+
+        Parameters
+        ----------
+        db : motor.motor_asyncio.AsyncIOMotorDatabase
+            MongoDB database connection
+
+        """
+        self.db = db
         self._genres: list[str] = None
 
     async def get_genres(self) -> list[str]:
+        """Retrieve list of game genres from the database.
+
+        Fetches distinct genres from the games collection. Results are
+        cached after first retrieval.
+
+        Returns
+        -------
+        list[str]
+            List of unique game genres
+
+        """
         if self._genres is None:
-            cursor: list[str] = await self.database["games"].distinct("genres")
-            self._genres = list(cursor)
-            logger.info(f"Loaded {len(self._genres)} genres")
+            exec_query: list[str] = await self.db["games"].distinct(
+                "genres",
+                {"genres": {"$ne": None}},
+            )
+            self._genres = list(exec_query)
+            logger.info("Loaded %d genres", len(self._genres))
 
         return self._genres
 
 
 class EmbeddingService:
-    """Embedding service using Voyage AI."""
+    """Embedding service using Voyage AI.
+
+    This service provides text embedding generation capabilities using
+    the Voyage AI API.
+
+    Attributes
+    ----------
+    client : voyageai.Client
+        Voyage AI client instance
+
+    """
 
     def __init__(self, api_key: str) -> None:
-        """Initialize service with Voyage AI client."""
+        """Initialize service with Voyage AI client.
+
+        Parameters
+        ----------
+        api_key : str
+            Voyage AI API key for authentication
+
+        """
         self.client = voyageai.Client(api_key=api_key)
 
     async def generate_embeddings(
@@ -56,7 +117,26 @@ class EmbeddingService:
         texts: list[str],
         input_type: str = "document",
     ) -> list[list[float]] | list[list[int]]:
-        """Generate embeddings using Voyage AI client."""
+        """Generate embeddings using Voyage AI client.
+
+        Parameters
+        ----------
+        texts : list[str]
+            List of text strings to generate embeddings for
+        input_type : str, optional
+            Type of input text, by default "document"
+
+        Returns
+        -------
+        list[list[float]] or list[list[int]]
+            List of embedding vectors for each input text
+
+        Raises
+        ------
+        Exception
+            If embedding generation fails
+
+        """
         try:
             result = self.client.embed(
                 texts=texts,
@@ -71,20 +151,58 @@ class EmbeddingService:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator:
+    """Manage FastAPI application lifespan.
+
+    Handles initialization and cleanup of database connections and
+    services during application startup and shutdown.
+
+    Parameters
+    ----------
+    app : FastAPI
+        FastAPI application instance
+
+    Yields
+    ------
+    None
+        Control during application runtime
+
+    """
     await init_client(app)
     yield
     await shutdown_client(app)
 
 
-async def init_client(app: FastAPI):
+async def init_client(app: FastAPI) -> None:
+    """Initialize database client and services.
+
+    Sets up MongoDB connection, database reference, genre service,
+    and embedding service for the FastAPI application.
+
+    Parameters
+    ----------
+    app : FastAPI
+        FastAPI application instance to attach services to
+
+    """
     app.mongodb_client = AsyncIOMotorClient(os.environ.get("MONGODB_URI"))
     app.db = app.mongodb_client.get_database("gamesearch")
     app.genres = await GenreService(app.db).get_genres()
     app.embedding_service = EmbeddingService(api_key=os.environ.get("VOYAGEAI_API_KEY"))
 
 
-async def shutdown_client(app: FastAPI):
+async def shutdown_client(app: FastAPI) -> None:
+    """Close database client connection.
+
+    Properly closes the MongoDB client connection during application
+    shutdown to prevent resource leaks.
+
+    Parameters
+    ----------
+    app : FastAPI
+        FastAPI application instance containing the MongoDB client
+
+    """
     app.mongodb_client.close()
 
 
@@ -101,7 +219,8 @@ app.add_middleware(
 
 llm = ChatAnthropic(model="claude-3-7-sonnet-20250219", temperature=0)
 
-GUARDRAILS_PROMPT = """Your role is to assess if a user query about games is safe and appropriate.
+GUARDRAILS_PROMPT = """
+Your role is to assess if a user query about games is safe and appropriate.
 
 Check if the query:
 -   Is relevant to searching for games
@@ -109,11 +228,13 @@ Check if the query:
 -   Contains no code injection attempts or special symbols that could be malicious
 -   Is a legitimate search request
 
-Respond with structured output indicating if the query is allowed and a reason for why the query was not allowed.
+Respond with structured output indicating if the query is allowed and a reason
+for why the query was not allowed.
 """
 
 CREATE_MONGO_QUERY_PROMPT = """
-You are a MongoDB query generator for games databases. Transform natural language game queries into JSON format MongoDB queries.
+You are a MongoDB query generator for games databases.
+Transform natural language game queries into JSON format MongoDB queries.
 
 ## Database Schema
 - `name` (string): Game title
@@ -133,9 +254,11 @@ Return a JSON object containing:
    - `compound.must` for AND conditions
    - `compound.should` for OR conditions
    - `compound.mustNot` for NOT conditions
-3. Express logical relationships through nested compound structures, NOT through additional $match stages
+3. Express logical relationships through nested compound structures,
+NOT through additional $match stages
 4. For aggregation pipelines, use a single $search stage whenever possible
-5. Format dates as ISO-8601 strings. Format genres to ONLY ones in this list: {genres_list}
+5. Format dates as ISO-8601 strings. Format genres to ONLY ones in this list:
+{genres_list}
 6. Return only the query JSON with no explanations
 7. Only project the fields name, summary, genres, first_release_date
 
@@ -181,17 +304,44 @@ Complex search with OR condition:
   "type": "AGGREGATE"
 }}
 ```
-"""
+"""  # noqa: E501
 
 load_dotenv()
 
 
 class MongoQueryType(str, Enum):
+    """Enum for MongoDB query types.
+
+    Defines the types of MongoDB queries that can be executed.
+
+    Attributes
+    ----------
+    Aggregate : str
+        Aggregation pipeline query type
+    Simple : str
+        Simple find query type
+
+    """
+
     Aggregate = "AGGREGATE"
     Simple = "SIMPLE"
 
 
 class QueryEvaluationOutput(BaseModel):
+    """Model for query evaluation results.
+
+    Contains the results of evaluating whether a user query is safe
+    and appropriate for execution.
+
+    Attributes
+    ----------
+    is_allowed : bool
+        Whether a query is allowed (True) or not (False)
+    violation_reason : str or None
+        Violation reason for why the query was not allowed
+
+    """
+
     is_allowed: bool = Field(
         description="Whether a query is allowed (True) or not (False)",
     )
@@ -202,6 +352,22 @@ class QueryEvaluationOutput(BaseModel):
 
 
 class MongoQueryOutput(BaseModel):
+    """Model for MongoDB query output.
+
+    Contains the structured MongoDB query information generated from
+    natural language input.
+
+    Attributes
+    ----------
+    query : list[dict[str, Any]] or dict[str, Any]
+        MongoDB query object (aggregation pipeline or find query)
+    project : dict[str, int]
+        Dictionary of fields to include in MongoDB execution
+    type : str
+        Query type (SIMPLE or AGGREGATE)
+
+    """
+
     query: list[dict[str, Any]] | dict[str, Any] = Field(
         description="MongoDB query object",
     )
@@ -210,20 +376,98 @@ class MongoQueryOutput(BaseModel):
     )
     type: str = Field(description="Query type (SIMPLE or AGGREGATE)")
 
+    @field_validator("query", mode="after")
+    @classmethod
+    def convert_date_strings(
+        cls,
+        value: list[dict[str, Any]] | dict[str, Any],
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """Field validator to automatically convert date strings into datetime objects.
+
+        Used to convert date patterns in the processed query to datetime objects for the
+        MongoDB queries to work properly.
+
+        Parameters
+        ----------
+        cls : MongoQueryOutput
+            The class being validated (automatically provided by Pydantic)
+        value : list[dict[str, Any]] or dict[str, Any]
+            The query object containing potential date strings to convert
+
+        Returns
+        -------
+        list[dict[str, Any]] or dict[str, Any]
+            The query object with date strings converted to datetime objects
+
+        """
+        return _convert_date_strings_to_datetime(value)
+
 
 class QueryState(BaseModel):
+    """Model representing the state of a query throughout processing.
+
+    Contains all information needed to process, execute, and paginate
+    through query results.
+
+    Attributes
+    ----------
+    query : str
+        Original user query string
+    use_vector_search : bool
+        Whether to use vector search instead of MongoDB query
+    evaluation_output : QueryEvaluationOutput or None
+        Results of query safety evaluation
+    genres_list : list[str]
+        List of available game genres
+    error : str or None
+        Error message if query processing failed
+    result : list[Any] or None
+        Query execution results
+    page : int
+        Current page number for pagination (default: 1)
+    page_size : int
+        Number of results per page (default: 20)
+    has_next_page : bool or None
+        Whether more results are available
+    processed_query : MongoQueryOutput | None
+        Processed MongoDB output
+    vector_embedding : list[float] or None
+        Vector embedding for vector search queries
+
+    """
+
     query: str
     use_vector_search: bool
     evaluation_output: QueryEvaluationOutput | None = None
+    processed_output: MongoQueryOutput | None = None
     genres_list: list[str] = []
     error: str | None = None
     result: list[Any] | None = None
+    page: int = 1
+    page_size: int = 20
+    has_next_page: bool | None = None
+    vector_embedding: list[float] | None = None
 
     model_config = ConfigDict(exclude_none=True)
 
 
-def evaluate_query(state: QueryState):
-    """Evaluate if query is allowed and return status as structured output."""
+def evaluate_query(state: QueryState) -> QueryState:
+    """Evaluate if query is allowed and return status as structured output.
+
+    Uses an LLM with guardrails to determine if the user query is safe
+    and appropriate for execution.
+
+    Parameters
+    ----------
+    state : QueryState
+        Current query state containing the user query
+
+    Returns
+    -------
+    QueryState
+        Updated state with evaluation results
+
+    """
     messages = [
         SystemMessage(content=GUARDRAILS_PROMPT),
         HumanMessage(content=state.query),
@@ -236,29 +480,102 @@ def evaluate_query(state: QueryState):
     return state
 
 
-def check_allowed(state: QueryState):
-    """Routing function to handle if the query is allowed."""
+def check_allowed(state: QueryState) -> bool:
+    """Routing function to handle if the query is allowed.
+
+    Parameters
+    ----------
+    state : QueryState
+        Current query state with evaluation results
+
+    Returns
+    -------
+    bool
+        True if query is allowed, False otherwise
+
+    """
     return state.evaluation_output.is_allowed
 
 
-def route_allowed_by_type(state: QueryState):
-    """Routing function to handle allowed queries by their query type."""
+def route_allowed_by_type(state: QueryState) -> bool:
+    """Routing function to handle allowed queries by their query type.
+
+    Parameters
+    ----------
+    state : QueryState
+        Current query state
+
+    Returns
+    -------
+    bool
+        True if vector search should be used, False for MongoDB query
+
+    """
     return state.use_vector_search
 
 
-def handle_not_allowed(state: QueryState):
-    """Respond to a query that is not allowed."""
+def handle_not_allowed(state: QueryState) -> QueryState:
+    """Respond to a query that is not allowed.
+
+    Sets an error message for queries that failed safety evaluation.
+
+    Parameters
+    ----------
+    state : QueryState
+        Current query state
+
+    Returns
+    -------
+    QueryState
+        Updated state with error message
+
+    """
     state.error = "This type of query is not allowed. Please try again with a search for game-related topics."
 
     return state
 
 
-def handle_allowed(state: QueryState):
+def handle_allowed(state: QueryState) -> QueryState:
+    """Handle queries that passed safety evaluation.
+
+    Passthrough function for allowed queries.
+
+    Parameters
+    ----------
+    state : QueryState
+        Current query state
+
+    Returns
+    -------
+    QueryState
+        Unchanged query state
+
+    """
     return state
 
 
-async def handle_hard_query(state: QueryState):
-    """Extract relevant fields for HARD_QUERY types."""
+async def handle_hard_query(state: QueryState) -> QueryState:
+    """Extract relevant fields for HARD_QUERY types.
+
+    Processes natural language queries into MongoDB queries using an LLM.
+    Handles both simple find queries and aggregation pipelines with pagination.
+
+    Parameters
+    ----------
+    state : QueryState
+        Current query state with user query and genres list
+
+    Returns
+    -------
+    QueryState
+        Updated state with query results and pagination information
+
+    Raises
+    ------
+    Exception
+        If query parsing or execution fails
+
+    """
     messages = [
         SystemMessage(
             content=CREATE_MONGO_QUERY_PROMPT.format(genres_list=state.genres_list),
@@ -266,29 +583,49 @@ async def handle_hard_query(state: QueryState):
         HumanMessage(content=state.query),
     ]
 
-    response = llm.invoke(messages)
-
     try:
-        structured_llm = llm.with_structured_output(MongoQueryOutput)
-        response = structured_llm.invoke(messages)
-        extracted_json = response.model_dump()
-        _convert_date_strings_to_datetime(extracted_json)
-        logger.info(extracted_json)
+        if not state.processed_output:
+            structured_llm = llm.with_structured_output(MongoQueryOutput)
+            state.processed_output = structured_llm.invoke(messages)
 
-        match extracted_json["type"]:
+        skip_count = (state.page - 1) * state.page_size
+
+        match state.processed_output.type:
             case MongoQueryType.Aggregate:
-                extracted_json["query"].append({"$project": extracted_json["project"]})
-                state.result = (
-                    await app.db["games"]
-                    .aggregate(extracted_json["query"])
-                    .to_list(length=20)
+                # Create a copy of the query for execution
+                exec_query = state.processed_output.query.copy()
+                exec_query.append({"$project": state.processed_output.project})
+
+                # Add pagination to aggregate query and get one extra to check if there
+                # are more pages
+                exec_query.append({"$skip": skip_count})
+                exec_query.append(
+                    {"$limit": state.page_size + 1},
                 )
+
+                state.result = (
+                    await app.db["games"].aggregate(exec_query).to_list(length=None)
+                )
+
+                # Check if there are more results
+                state.has_next_page = len(state.result) > state.page_size
+                if state.has_next_page:
+                    state.result = state.result[:-1]  # Remove the extra result
             case MongoQueryType.Simple:
-                state.result = (
-                    await app.db["games"]
-                    .find(extracted_json["query"], extracted_json["project"])
-                    .to_list(length=20)
+                # Add pagination to find query
+                exec_query = app.db["games"].find(
+                    state.processed_output.query,
+                    state.processed_output.project,
                 )
+                exec_query = exec_query.skip(skip_count).limit(
+                    state.page_size + 1,
+                )
+                state.result = await exec_query.to_list(length=None)
+
+                # Check if there are more results
+                state.has_next_page = len(state.result) > state.page_size
+                if state.has_next_page:
+                    state.result = state.result[:-1]  # Remove the extra result
     except Exception:
         logger.exception("Error parsing extraction response")
         raise
@@ -296,18 +633,44 @@ async def handle_hard_query(state: QueryState):
         return state
 
 
-async def handle_vector_query(state: QueryState):
-    """Run a user query as a vector search in MongoDB database."""
+async def handle_vector_query(state: QueryState) -> QueryState:
+    """Run a user query as a vector search in MongoDB database.
+
+    Generates embeddings for the user query and performs vector similarity
+    search against the games collection with pagination support.
+
+    Parameters
+    ----------
+    state : QueryState
+        Current query state with user query
+
+    Returns
+    -------
+    QueryState
+        Updated state with vector search results and pagination information
+
+    Raises
+    ------
+    Exception
+        If embedding generation or vector search fails
+
+    """
     try:
-        user_embed = await app.embedding_service.generate_embeddings(state.query)
+        if not state.vector_embedding:
+            user_embed = await app.embedding_service.generate_embeddings(state.query)
+            # Store embedding for pagination
+            state.vector_embedding = user_embed[0]
+        skip_count = (state.page - 1) * state.page_size
+
+        # Get extra results to enable pagination
         pipeline = [
             {
                 "$vectorSearch": {
                     "index": "vector_index",
                     "path": "text_embeddings",
-                    "queryVector": user_embed[0],
+                    "queryVector": state.vector_embedding,
                     "numCandidates": 150,
-                    "limit": 20,
+                    "limit": state.page_size + 1,
                 },
             },
             {
@@ -320,8 +683,14 @@ async def handle_vector_query(state: QueryState):
                     "franchises": 1,
                 },
             },
+            {"$skip": skip_count},
         ]
         state.result = await app.db["games"].aggregate(pipeline).to_list()
+
+        # Check if there are more results
+        state.has_next_page = len(state.result) > state.page_size
+        if state.has_next_page:
+            state.result = state.result[:-1]  # Remove the extra result
     except Exception:
         logger.exception("Error running vector search")
         raise
@@ -329,16 +698,40 @@ async def handle_vector_query(state: QueryState):
         return state
 
 
-def _convert_date_strings_to_datetime(obj: dict | list):
-    """Recursively traverse a dictionary or list and convert date strings to datetime objects."""
-    date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+def _convert_date_strings_to_datetime(obj: dict | list) -> dict[str, Any]:
+    """Recursively traverse a dictionary or list and convert date strings to datetime objects.
+
+    Searches for ISO 8601 formatted date strings and converts them to Python
+    datetime objects for proper MongoDB query execution.
+
+    Parameters
+    ----------
+    obj : dict or list
+        Object to traverse and convert date strings in
+
+    Returns
+    -------
+    dict or list
+        Object with date strings converted to datetime objects
+
+    """
+    date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z{0,1}$")
 
     if isinstance(obj, dict):
         for key, value in obj.items():
             if isinstance(value, (dict, list)):
                 obj[key] = _convert_date_strings_to_datetime(value)
             elif isinstance(value, str) and date_pattern.match(value):
-                obj[key] = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+                if value.endswith("Z"):
+                    obj[key] = datetime.datetime.strptime(
+                        value,
+                        "%Y-%m-%dT%H:%M:%SZ",
+                    ).astimezone(datetime.UTC)
+                else:
+                    obj[key] = datetime.datetime.strptime(
+                        value,
+                        "%Y-%m-%dT%H:%M:%S",
+                    ).astimezone(datetime.UTC)
 
     elif isinstance(obj, list):
         for i, item in enumerate(obj):
@@ -347,7 +740,19 @@ def _convert_date_strings_to_datetime(obj: dict | list):
     return obj
 
 
-def compile_agent_workflow():
+def compile_agent_workflow() -> CompiledGraph:
+    """Compile the agent workflow for query processing.
+
+    Creates a state graph that routes queries through safety evaluation,
+    then to either MongoDB query generation or vector search based on
+    the query type.
+
+    Returns
+    -------
+    langgraph.graph.graph.CompiledGraph
+        Compiled workflow graph for query processing
+
+    """
     workflow = StateGraph(QueryState)
     workflow.add_node("evaluate_query", evaluate_query)
     workflow.add_node("handle_allowed", handle_allowed)
@@ -377,25 +782,60 @@ chain = compile_agent_workflow()
 
 
 @app.get("/")
-async def health_check():
+async def health_check() -> dict[str, str]:
+    """Health check endpoint.
+
+    Returns
+    -------
+    dict
+        Status dictionary indicating service health
+
+    """
     return {"status": "OK"}
 
 
 @app.post("/search")
-async def search(user_query: QueryState):
-    if len(user_query.query.strip()) == 0:
-        logger.info(user_query)
+async def search(user_state: QueryState) -> QueryState:
+    """Search for games using natural language queries.
+
+    Processes user queries through safety evaluation and routes them to either
+    MongoDB queries or vector search based on query type. Supports pagination
+    for large result sets.
+
+    Parameters
+    ----------
+    user_state : QueryState
+        Query state containing search parameters and pagination metadata
+
+    Returns
+    -------
+    dict[str, Any]
+        Search response with pagination metadata
+
+    Raises
+    ------
+    HTTPException
+        400: If query is empty
+        422: If query cannot be processed
+        500: If database error or unexpected error occurs
+
+    """
+    if len(user_state.query.strip()) == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="The search query was empty",
         )
 
-    user_query.genres_list = app.genres
+    user_state.genres_list = app.genres
 
     try:
-        chain_response = await chain.ainvoke(user_query)
-        chain_result: list[Any] = chain_response["result"]
-        logger.info(chain_result)
+        if user_state.vector_embedding:
+            response = await handle_vector_query(user_state)
+        elif user_state.processed_output:
+            response = await handle_hard_query(user_state)
+        else:
+            # Normal workflow execution
+            response = await chain.ainvoke(user_state)
 
     except KeyError as e:
         logger.exception("Malformed LLM response")
@@ -416,10 +856,17 @@ async def search(user_query: QueryState):
             detail="An unexpected error occurred",
         ) from e
 
-    return chain_response
+    else:
+        return response
 
 
-def main():
+def main() -> None:
+    """Start the FastAPI application server.
+
+    Runs the application using uvicorn with development settings including
+    auto-reload functionality for code changes.
+
+    """
     import uvicorn
 
     uvicorn.run("backend.main:app", host="0.0.0.0", port=8001, reload=True)
