@@ -6,13 +6,13 @@ import datetime
 import logging
 import os
 import re
+import urllib
 from contextlib import asynccontextmanager
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 import voyageai
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -21,6 +21,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pymongo.errors import PyMongoError
 from rich.logging import RichHandler
+from starlette.responses import JSONResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -150,6 +151,49 @@ class EmbeddingService:
             return result.embeddings
 
 
+def get_required_env(var: str) -> str:
+    """Raise an exception for env variables that should be provided.
+
+    Parameters
+    ----------
+    var : str
+        The name of the environment variable to retrieve.
+
+    Returns
+    -------
+    str
+        The value of the environment variable.
+
+    Raises
+    ------
+    ValueError
+        If the environment variable is not set or is empty.
+
+    """
+    value = os.environ.get(var)
+    if not value:
+        msg = f"{var} environment variable is required but not set"
+        raise ValueError(msg)
+
+    return value
+
+
+def load_config():
+    """Load configuration based on environment."""
+    environment = os.getenv("ENVIRONMENT", "development")
+
+    if environment == "development":
+        try:
+            from dotenv import load_dotenv
+
+            load_dotenv()
+            logger.info("Development mode: Loaded configuration from .env file")
+        except ImportError:
+            logger.warning("python-dotenv not available, using environment variables")
+    else:
+        logger.info("Production mode: Loaded configuration from environment variables")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     """Manage FastAPI application lifespan.
@@ -168,6 +212,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         Control during application runtime
 
     """
+    load_config()
+
     await init_client(app)
     yield
     await shutdown_client(app)
@@ -185,7 +231,17 @@ async def init_client(app: FastAPI) -> None:
         FastAPI application instance to attach services to
 
     """
-    app.mongodb_client = AsyncIOMotorClient(os.environ.get("MONGODB_URI"))
+    base_uri = get_required_env("MONGODB_BASE_URI")
+    mongodb_user = get_required_env("MONGODB_USER")
+    mongodb_password = get_required_env("MONGODB_PASSWORD")
+
+    mongodb_user = urllib.parse.quote_plus(mongodb_user)
+    mongodb_password = urllib.parse.quote_plus(mongodb_password)
+
+    modified_uri = f"mongodb+srv://{mongodb_user}:{mongodb_password}@"
+    full_uri = base_uri.replace("mongodb+srv://", modified_uri)
+
+    app.mongodb_client = AsyncIOMotorClient(full_uri)
     app.db = app.mongodb_client.get_database("gamesearch")
     app.genres = await GenreService(app.db).get_genres()
     app.embedding_service = EmbeddingService(api_key=os.environ.get("VOYAGEAI_API_KEY"))
@@ -206,16 +262,53 @@ async def shutdown_client(app: FastAPI) -> None:
     app.mongodb_client.close()
 
 
+def get_allowed_origins() -> list[str]:
+    """Get allowed origins from environment variable."""
+    origins_env = os.environ.get("ALLOWED_ORIGINS", "")
+    if not origins_env:
+        return ["http://localhost:5173"]
+
+    return [origin.strip() for origin in origins_env.split(",")]
+
+
 app = FastAPI(title="Gamesearch API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=get_allowed_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Content-Type", "Authorization"],
     expose_headers=["*"],
     max_age=CACHE_TTL,
 )
+
+
+@app.middleware("http")
+async def validate_origin(request: Request, call_next):
+    """Validate request origin for additional security."""
+    origin = request.headers.get("origin")
+    referrer = request.headers.get("referrer")
+
+    allowed_origins = get_allowed_origins()
+    if not origin and not referrer:
+        if request.url.path in ["/health", "/docs", "openapi.json"]:
+            response = await call_next(request)
+            return response
+
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={"detail": "Origin header required"},
+        )
+
+    request_origin = origin or referrer
+    if not any(origin in request_origin for origin in allowed_origins):
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={"detail": "Origin header required"},
+        )
+    response = await call_next(request)
+    return response
+
 
 llm = ChatAnthropic(model="claude-3-7-sonnet-20250219", temperature=0)
 
@@ -305,8 +398,6 @@ Complex search with OR condition:
 }}
 ```
 """  # noqa: E501
-
-load_dotenv()
 
 
 class MongoQueryType(str, Enum):
@@ -781,17 +872,21 @@ def compile_agent_workflow() -> CompiledGraph:
 chain = compile_agent_workflow()
 
 
-@app.get("/")
+@app.get("/health")
 async def health_check() -> dict[str, str]:
-    """Health check endpoint.
-
-    Returns
-    -------
-    dict
-        Status dictionary indicating service health
-
-    """
-    return {"status": "OK"}
+    """Health check endpoint for AWS load balancer."""
+    try:
+        await app.mongodb_client.admin.command("ping")
+        return {
+            "status": "healthy",
+            "timestamp": datetime.datetime.now(tz=datetime.UTC).isoformat(),
+        }
+    except Exception as e:
+        logger.exception("Health check failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service unhealthy",
+        ) from e
 
 
 @app.post("/search")
@@ -869,7 +964,15 @@ def main() -> None:
     """
     import uvicorn
 
-    uvicorn.run("backend.main:app", host="0.0.0.0", port=8001, reload=True)
+    is_development = os.environ.get("ENVIRONMENT", "production") == "development"
+
+    uvicorn.run(
+        "backend.main:app",
+        host="0.0.0.0",  # noqa: S104
+        port=int(os.environ.get("PORT", "8000")),
+        reload=is_development,
+        workers=1 if is_development else None,
+    )
 
 
 if __name__ == "__main__":
