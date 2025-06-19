@@ -13,7 +13,8 @@ resource "aws_ecr_repository" "backend_repo" {
   }
 
   tags = {
-    Name = "gamesearch-backend-repo"
+    Name    = "gamesearch-backend-repo"
+    Project = "gamesearch"
   }
 }
 
@@ -45,8 +46,8 @@ resource "aws_vpc" "main" {
   enable_dns_support   = true
 
   tags = {
-    Name = "gamesearch-vpc"
-    Size = "small-app-optimized"
+    Name    = "gamesearch-vpc"
+    Project = "gamesearch"
   }
 }
 
@@ -55,7 +56,8 @@ resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
   tags = {
-    Name = "gamesearch-igw"
+    Name    = "gamesearch-igw"
+    Project = "gamesearch"
   }
 }
 
@@ -69,7 +71,8 @@ resource "aws_subnet" "public" {
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "gamesearch-public-subnet-${count.index + 1}"
+    Name    = "gamesearch-public-subnet-${count.index + 1}"
+    Project = "gamesearch"
   }
 }
 
@@ -81,7 +84,8 @@ resource "aws_subnet" "private" {
   availability_zone = data.aws_availability_zones.available.names[count.index]
 
   tags = {
-    Name = "gamesearch-private-subnet-${count.index + 1}"
+    Name    = "gamesearch-private-subnet-${count.index + 1}"
+    Project = "gamesearch"
   }
 }
 
@@ -95,7 +99,8 @@ resource "aws_route_table" "public" {
   }
 
   tags = {
-    Name = "gamesearch-public-rt"
+    Name    = "gamesearch-public-rt"
+    Project = "gamesearch"
   }
 }
 
@@ -137,7 +142,8 @@ resource "aws_security_group" "alb" {
   }
 
   tags = {
-    Name = "gamesearch-alb-sg"
+    Name    = "gamesearch-alb-sg"
+    Project = "gamesearch"
   }
 }
 
@@ -164,7 +170,8 @@ resource "aws_security_group" "fargate" {
   }
 
   tags = {
-    Name = "gamesearch-fargate-sg"
+    Name    = "gamesearch-fargate-sg"
+    Project = "gamesearch"
   }
 }
 
@@ -179,7 +186,8 @@ resource "aws_lb" "main" {
   enable_deletion_protection = false
 
   tags = {
-    Name = "gamesearch-alb"
+    Name    = "gamesearch-alb"
+    Project = "gamesearch"
   }
 }
 
@@ -204,15 +212,252 @@ resource "aws_lb_target_group" "backend" {
   }
 
   tags = {
-    Name = "gamesearch-backend-tg"
+    Name    = "gamesearch-backend-tg"
+    Project = "gamesearch"
   }
 }
 
-# Load balancer listener
-resource "aws_lb_listener" "backend" {
+# Route53 Hosted Zone
+resource "aws_route53_zone" "main" {
+  name = var.domain_name
+
+  tags = {
+    Name    = "gamesearch-app-zone"
+    Project = "gamesearch"
+  }
+}
+
+# ACM Certificate for SSL/TLS
+resource "aws_acm_certificate" "main" {
+  domain_name               = var.domain_name
+  subject_alternative_names = ["*.${var.domain_name}"]
+  validation_method         = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  tags = {
+    Name    = "gamesearch-app-cert"
+    Project = "gamesearch"
+  }
+}
+
+# Route53 records for ACM certificate validation
+resource "aws_route53_record" "cert_validation" {
+  for_each = {
+    for dvo in aws_acm_certificate.main.domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      record = dvo.resource_record_value
+      type   = dvo.resource_record_type
+    }
+  }
+
+  allow_overwrite = true
+  name            = each.value.name
+  records         = [each.value.record]
+  ttl             = 60
+  type            = each.value.type
+  zone_id         = aws_route53_zone.main.zone_id
+}
+
+# ACM certificate validation
+resource "aws_acm_certificate_validation" "main" {
+  certificate_arn         = aws_acm_certificate.main.arn
+  validation_record_fqdns = [for record in aws_route53_record.cert_validation : record.fqdn]
+
+  timeouts {
+    create = "5m"
+  }
+}
+
+# Route53 A record for api.gamesearch.app pointing to ALB
+resource "aws_route53_record" "api" {
+  zone_id = aws_route53_zone.main.zone_id
+  name    = "${var.api_subdomain}.${var.domain_name}"
+  type    = "A"
+
+  alias {
+    name                   = aws_lb.main.dns_name
+    zone_id                = aws_lb.main.zone_id
+    evaluate_target_health = true
+  }
+}
+
+# S3 bucket for frontend static website
+resource "aws_s3_bucket" "frontend" {
+  bucket = var.domain_name
+
+  tags = {
+    Name    = "gamesearch-frontend"
+    Project = "gamesearch"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "frontend" {
+  bucket = aws_s3_bucket.frontend.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_cloudfront_origin_access_control" "frontend" {
+  name                              = "gamesearch-frontend-oac"
+  description                       = "Origin Access Control for Gamesearch frontend S3 bucket"
+  origin_access_control_origin_type = "s3"
+  signing_behavior                  = "always"
+  signing_protocol                  = "sigv4"
+}
+
+resource "aws_s3_bucket_website_configuration" "frontend" {
+  bucket = aws_s3_bucket.frontend.id
+
+  index_document {
+    suffix = "index.html"
+  }
+
+  error_document {
+    key = "index.html" # For SPA routing
+  }
+}
+
+# S3 bucket policy - only allow CloudFront access
+resource "aws_s3_bucket_policy" "frontend" {
+  bucket     = aws_s3_bucket.frontend.id
+  depends_on = [aws_s3_bucket_public_access_block.frontend]
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowCloudFrontServicePrincipal"
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudfront.amazonaws.com"
+        }
+        Action   = "s3:GetObject"
+        Resource = "${aws_s3_bucket.frontend.arn}/*"
+        Condition = {
+          StringEquals = {
+            "AWS:SourceArn" = aws_cloudfront_distribution.frontend.arn
+          }
+        }
+      }
+    ]
+  })
+}
+
+# CloudFront distribution for frontend
+resource "aws_cloudfront_distribution" "frontend" {
+  origin {
+    domain_name              = aws_s3_bucket.frontend.bucket_regional_domain_name
+    origin_id                = "S3-${var.domain_name}"
+    origin_access_control_id = aws_cloudfront_origin_access_control.frontend.id
+  }
+
+  enabled             = true
+  is_ipv6_enabled     = true
+  default_root_object = "index.html"
+
+  aliases = [var.domain_name, "www.${var.domain_name}"]
+
+  default_cache_behavior {
+    allowed_methods        = ["GET", "HEAD", "OPTIONS"]
+    cached_methods         = ["GET", "HEAD"]
+    target_origin_id       = "S3-${var.domain_name}"
+    compress               = true
+    viewer_protocol_policy = "redirect-to-https"
+
+    cache_policy_id = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled policy
+  }
+
+  # SPA routing - handle all routes with index.html
+  custom_error_response {
+    error_code         = 404
+    response_code      = 200
+    response_page_path = "/index.html"
+  }
+
+  custom_error_response {
+    error_code         = 403
+    response_code      = 200
+    response_page_path = "/index.html"
+  }
+
+  price_class = "PriceClass_100" # Use only North America and Europe edge locations
+
+  restrictions {
+    geo_restriction {
+      restriction_type = "none"
+    }
+  }
+
+  viewer_certificate {
+    acm_certificate_arn      = aws_acm_certificate_validation.main.certificate_arn
+    ssl_support_method       = "sni-only"
+    minimum_protocol_version = "TLSv1.2_2021"
+  }
+
+  tags = {
+    Name    = "gamesearch-frontend-distribution"
+    Project = "gamesearch"
+  }
+
+  depends_on = [aws_acm_certificate_validation.main]
+}
+
+# Route53 record for root domain (points to CloudFront)
+resource "aws_route53_record" "root" {
+  zone_id = aws_route53_zone.main.zone_id
+  name    = var.domain_name
+  type    = "A"
+
+  alias {
+    name                   = aws_cloudfront_distribution.frontend.domain_name
+    zone_id                = aws_cloudfront_distribution.frontend.hosted_zone_id
+    evaluate_target_health = false
+  }
+}
+
+# Route53 record for www subdomain (points to CloudFront)
+resource "aws_route53_record" "www" {
+  zone_id = aws_route53_zone.main.zone_id
+  name    = "www.${var.domain_name}"
+  type    = "A"
+
+  alias {
+    name                   = aws_cloudfront_distribution.frontend.domain_name
+    zone_id                = aws_cloudfront_distribution.frontend.hosted_zone_id
+    evaluate_target_health = false
+  }
+}
+
+# HTTP Listener (redirects to HTTPS)
+resource "aws_lb_listener" "http_redirect" {
   load_balancer_arn = aws_lb.main.arn
   port              = "80"
   protocol          = "HTTP"
+
+  default_action {
+    type = "redirect"
+
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+}
+
+# HTTPS Listener for ALB
+resource "aws_lb_listener" "https" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = "443"
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS-1-2-2017-01"
+  certificate_arn   = aws_acm_certificate_validation.main.certificate_arn
 
   default_action {
     type             = "forward"
@@ -230,7 +475,8 @@ resource "aws_ecs_cluster" "main" {
   }
 
   tags = {
-    Name = "gamesearch-cluster"
+    Name    = "gamesearch-cluster"
+    Project = "gamesearch"
   }
 }
 
@@ -252,7 +498,8 @@ resource "aws_iam_role" "ecs_task_execution_role" {
   })
 
   tags = {
-    Name = "gamesearch-ecs-execution-role"
+    Name    = "gamesearch-ecs-execution-role"
+    Project = "gamesearch"
   }
 }
 
@@ -267,7 +514,8 @@ resource "aws_cloudwatch_log_group" "backend" {
   retention_in_days = 7
 
   tags = {
-    Name = "gamesearch-backend-logs"
+    Name    = "gamesearch-backend-logs"
+    Project = "gamesearch"
   }
 }
 
@@ -315,7 +563,7 @@ resource "aws_ecs_task_definition" "backend" {
         },
         {
           name  = "ALLOWED_ORIGINS"
-          value = var.allowed_origins
+          value = "https://${var.domain_name},https://www.${var.domain_name},https://${var.api_subdomain}.${var.domain_name}"
         },
         {
           name  = "ENVIRONMENT"
@@ -345,7 +593,8 @@ resource "aws_ecs_task_definition" "backend" {
   ])
 
   tags = {
-    Name = "gamesearch-backend-task"
+    Name    = "gamesearch-backend-task"
+    Project = "gamesearch"
   }
 }
 
@@ -369,9 +618,10 @@ resource "aws_ecs_service" "backend" {
     container_port   = 8000
   }
 
-  depends_on = [aws_lb_listener.backend]
+  depends_on = [aws_lb_listener.https, aws_lb_listener.http_redirect]
 
   tags = {
-    Name = "gamesearch-backend-service"
+    Name    = "gamesearch-backend-service"
+    Project = "gamesearch"
   }
 }

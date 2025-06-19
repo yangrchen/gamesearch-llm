@@ -27,8 +27,8 @@ module "etl" {
   voyageai_api_key                 = var.voyageai_api_key
 }
 
-module "fargate" {
-  source = "./infrastructure/fargate"
+module "app" {
+  source = "./infrastructure/app"
 
   aws_region                       = var.aws_region
   mongodbatlas_connection_uri_base = module.mongodb.mongodbatlas_connection_uri_base
@@ -36,8 +36,6 @@ module "fargate" {
   mongodbatlas_dbuser_password     = var.mongodbatlas_dbuser_password
   voyageai_api_key                 = var.voyageai_api_key
   anthropic_api_key                = var.anthropic_api_key
-  allowed_origins                  = var.allowed_origins
-
 }
 
 module "mongodb" {

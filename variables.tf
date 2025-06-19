@@ -65,9 +65,3 @@ variable "anthropic_api_key" {
   type        = string
   sensitive   = true
 }
-
-variable "allowed_origins" {
-  description = "Allowed origins for the backend"
-  type        = string
-  sensitive   = true
-}

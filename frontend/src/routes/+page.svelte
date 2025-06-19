@@ -3,6 +3,7 @@
 	import Pagination from '$lib/components/Pagination.svelte';
 	import PageSizeSelector from '$lib/components/PageSizeSelector.svelte';
 	import type { Game, SearchResponse } from '$lib/types';
+	import { PUBLIC_API_URL } from '$env/static/public';
 
 	let searchQuery = $state('');
 	let games = $state<Game[]>([]);
@@ -33,7 +34,7 @@
 		error = null;
 
 		try {
-			const response = await fetch('/api/search', {
+			const response = await fetch(PUBLIC_API_URL, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json'
@@ -62,7 +63,6 @@
 				throw new Error(data.evaluation_output.violation_reason || 'Query not allowed');
 			}
 
-			console.log('Search response:', data);
 			searchResponse = data;
 			games = data.result;
 		} catch (err) {
@@ -94,7 +94,7 @@
 						})
 			};
 
-			const response = await fetch('/api/search', {
+			const response = await fetch(PUBLIC_API_URL, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json'
@@ -112,7 +112,6 @@
 				throw new Error(data.error);
 			}
 
-			console.log('Pagination response:', data);
 			games = data.result;
 			searchResponse = { ...searchResponse, ...data };
 		} catch (err) {
@@ -160,25 +159,6 @@
 				>
 					🎮 Gamesearch
 				</h1>
-				<div class="text-sm text-slate-400">
-					Powered by AI •
-					{#if searchResponse}
-						Page {searchResponse.page} • {games.length} results •
-					{:else}
-						{games.length} results •
-					{/if}
-					<span class={useVectorSearch ? 'text-pink-400' : 'text-purple-400'}>
-						{useVectorSearch ? 'AI Search' : 'Structured Search'}
-					</span>
-					{#if searchResponse && searchResponse.page > 1}
-						<span
-							class="ml-2 inline-flex items-center gap-1 rounded-full bg-green-500/20 px-2 py-1 text-xs font-medium text-green-400"
-						>
-							<span class="icon-[material-symbols--bolt] text-xs"></span>
-							Fast pagination
-						</span>
-					{/if}
-				</div>
 			</div>
 		</div>
 	</header>
