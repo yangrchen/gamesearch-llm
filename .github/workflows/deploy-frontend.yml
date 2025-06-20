@@ -154,7 +154,7 @@ jobs:
                   aws s3 sync frontend/build/ s3://${{ steps.terraform.outputs.s3_frontend_bucket }}/ \
                   --delete \
                   --cache-control "public, max-age=0, must-revalidate" \
-                  --include "*.html"
+                  --include "*.html" \
                   --include "*.json"
 
             - name: Invalidate CloudFront cache
