@@ -710,10 +710,8 @@ async def handle_hard_query(state: QueryState) -> QueryState:
                 str(processed_output.query),
                 secret_key,
             )
-            logger.info(str(processed_output.query))
             state.processed_output = processed_output
         else:
-            logger.info(str(state.processed_output.query))
             decode_processed_query_or_vector(
                 str(state.processed_output.query),
                 state.signature,
