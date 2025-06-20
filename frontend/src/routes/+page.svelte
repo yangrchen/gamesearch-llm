@@ -43,7 +43,7 @@
 					has_next_page: false
 				}
 			};
-			const response = await fetch(PUBLIC_API_URL, {
+			const response = await fetch(`${PUBLIC_API_URL}/search`, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json'
@@ -90,7 +90,7 @@
 				}
 			};
 
-			const response = await fetch(PUBLIC_API_URL, {
+			const response = await fetch(`${PUBLIC_API_URL}/search`, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json'
