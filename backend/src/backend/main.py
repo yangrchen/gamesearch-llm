@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
+import hmac
+import json
 import logging
 import os
 import re
@@ -241,6 +244,7 @@ async def init_client(app: FastAPI) -> None:
     modified_uri = f"mongodb+srv://{mongodb_user}:{mongodb_password}@"
     full_uri = base_uri.replace("mongodb+srv://", modified_uri)
 
+    app.llm = ChatAnthropic(model="claude-3-7-sonnet-20250219", temperature=0)
     app.mongodb_client = AsyncIOMotorClient(full_uri)
     app.db = app.mongodb_client.get_database("gamesearch")
     app.genres = await GenreService(app.db).get_genres()
@@ -277,7 +281,7 @@ app.add_middleware(
     allow_origins=get_allowed_origins(),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["*"],
     expose_headers=["*"],
     max_age=CACHE_TTL,
 )
@@ -287,30 +291,28 @@ app.add_middleware(
 async def validate_origin(request: Request, call_next):
     """Validate request origin for additional security."""
     origin = request.headers.get("origin")
-    referrer = request.headers.get("referrer")
+    referer = request.headers.get("referer")
+
+    if request.url.path in ["/health", "/docs", "openapi.json"]:
+        response = await call_next(request)
+        return response
 
     allowed_origins = get_allowed_origins()
-    if not origin and not referrer:
-        if request.url.path in ["/health", "/docs", "openapi.json"]:
-            response = await call_next(request)
-            return response
-
+    if not origin and not referer:
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
             content={"detail": "Origin header required"},
         )
 
-    request_origin = origin or referrer
+    request_origin = origin or referer
     if not any(origin in request_origin for origin in allowed_origins):
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
-            content={"detail": "Origin header required"},
+            content={"detail": f"Origin '{request_origin}' not allowed"},
         )
     response = await call_next(request)
     return response
 
-
-llm = ChatAnthropic(model="claude-3-7-sonnet-20250219", temperature=0)
 
 GUARDRAILS_PROMPT = """
 Your role is to assess if a user query about games is safe and appropriate.
@@ -418,7 +420,7 @@ class MongoQueryType(str, Enum):
     Simple = "SIMPLE"
 
 
-class QueryEvaluationOutput(BaseModel):
+class GuardrailEvaluation(BaseModel):
     """Model for query evaluation results.
 
     Contains the results of evaluating whether a user query is safe
@@ -465,7 +467,7 @@ class MongoQueryOutput(BaseModel):
     project: dict[str, int] = Field(
         description="Dictionary of fields to include in MongoDB execution",
     )
-    type: str = Field(description="Query type (SIMPLE or AGGREGATE)")
+    type: MongoQueryType = Field(description="Query type (SIMPLE or AGGREGATE)")
 
     @field_validator("query", mode="after")
     @classmethod
@@ -494,11 +496,27 @@ class MongoQueryOutput(BaseModel):
         return _convert_date_strings_to_datetime(value)
 
 
-class QueryState(BaseModel):
-    """Model representing the state of a query throughout processing.
+class PaginationMetadata(BaseModel):
+    """Model representing pagination metadata from user.
 
-    Contains all information needed to process, execute, and paginate
-    through query results.
+    Attributes
+    ----------
+    page : int
+        Current page number for pagination (default: 1)
+    page_size : int
+        Number of results per page (default: 20)
+    has_next_page : bool or None
+        Whether more results are available
+
+    """
+
+    page: int = 1
+    page_size: int = 20
+    has_next_page: bool = False
+
+
+class UserState(BaseModel):
+    """Model representing the user state starting from request.
 
     Attributes
     ----------
@@ -506,38 +524,48 @@ class QueryState(BaseModel):
         Original user query string
     use_vector_search : bool
         Whether to use vector search instead of MongoDB query
-    evaluation_output : QueryEvaluationOutput or None
-        Results of query safety evaluation
-    genres_list : list[str]
-        List of available game genres
-    error : str or None
-        Error message if query processing failed
-    result : list[Any] or None
-        Query execution results
-    page : int
-        Current page number for pagination (default: 1)
-    page_size : int
-        Number of results per page (default: 20)
-    has_next_page : bool or None
-        Whether more results are available
-    processed_query : MongoQueryOutput | None
-        Processed MongoDB output
+    pagination_metadata: PaginationMetadata
+        Pagination metadata
     vector_embedding : list[float] or None
         Vector embedding for vector search queries
+    processed_output : MongoQueryOutput or None
+        Processed MongoDB output
+    signature : str or None
+        Verification signature for processed results
+    result : list[Any] or None
+        Query execution results
+    error : str or None
+        Error message if query processing failed
 
     """
 
     query: str
     use_vector_search: bool
-    evaluation_output: QueryEvaluationOutput | None = None
-    processed_output: MongoQueryOutput | None = None
-    genres_list: list[str] = []
-    error: str | None = None
-    result: list[Any] | None = None
-    page: int = 1
-    page_size: int = 20
-    has_next_page: bool | None = None
+    pagination_metadata: PaginationMetadata = PaginationMetadata()
     vector_embedding: list[float] | None = None
+    processed_output: MongoQueryOutput | None = None
+    signature: str | None = None
+    result: list[Any] | None = None
+    error: str | None = None
+
+
+class QueryState(UserState):
+    """Model representing the state of a query throughout processing.
+
+    Contains all information needed to process, execute, and paginate
+    through query results.
+
+    Attributes
+    ----------
+    guardrail_eval : GuardrailEvaluation or None
+        Results of guardrail safety evaluation
+    genres_list : list[str]
+        List of available game genres
+
+    """
+
+    guardrail_eval: GuardrailEvaluation | None = None
+    genres_list: list[str] = []
 
     model_config = ConfigDict(exclude_none=True)
 
@@ -564,9 +592,8 @@ def evaluate_query(state: QueryState) -> QueryState:
         HumanMessage(content=state.query),
     ]
 
-    structured_llm = llm.with_structured_output(QueryEvaluationOutput)
-    state.evaluation_output = structured_llm.invoke(messages)
-    state.result = None
+    structured_llm = app.llm.with_structured_output(GuardrailEvaluation)
+    state.guardrail_eval = structured_llm.invoke(messages)
 
     return state
 
@@ -585,7 +612,7 @@ def check_allowed(state: QueryState) -> bool:
         True if query is allowed, False otherwise
 
     """
-    return state.evaluation_output.is_allowed
+    return state.guardrail_eval.is_allowed
 
 
 def route_allowed_by_type(state: QueryState) -> bool:
@@ -621,7 +648,7 @@ def handle_not_allowed(state: QueryState) -> QueryState:
         Updated state with error message
 
     """
-    state.error = "This type of query is not allowed. Please try again with a search for game-related topics."
+    state.error = "This type of query is not allowed. Please try again with a  search for game-related topics."
 
     return state
 
@@ -675,11 +702,27 @@ async def handle_hard_query(state: QueryState) -> QueryState:
     ]
 
     try:
+        secret_key = get_required_env("GAMESEARCH_SECRET_KEY")
         if not state.processed_output:
-            structured_llm = llm.with_structured_output(MongoQueryOutput)
-            state.processed_output = structured_llm.invoke(messages)
+            structured_llm = app.llm.with_structured_output(MongoQueryOutput)
+            processed_output = structured_llm.invoke(messages)
+            state.signature = encode_processed_query_or_vector(
+                str(processed_output.query),
+                secret_key,
+            )
+            logger.info(str(processed_output.query))
+            state.processed_output = processed_output
+        else:
+            logger.info(str(state.processed_output.query))
+            decode_processed_query_or_vector(
+                str(state.processed_output.query),
+                state.signature,
+                secret_key,
+            )
 
-        skip_count = (state.page - 1) * state.page_size
+        skip_count = (
+            state.pagination_metadata.page - 1
+        ) * state.pagination_metadata.page_size
 
         match state.processed_output.type:
             case MongoQueryType.Aggregate:
@@ -691,7 +734,7 @@ async def handle_hard_query(state: QueryState) -> QueryState:
                 # are more pages
                 exec_query.append({"$skip": skip_count})
                 exec_query.append(
-                    {"$limit": state.page_size + 1},
+                    {"$limit": state.pagination_metadata.page_size + 1},
                 )
 
                 state.result = (
@@ -699,8 +742,10 @@ async def handle_hard_query(state: QueryState) -> QueryState:
                 )
 
                 # Check if there are more results
-                state.has_next_page = len(state.result) > state.page_size
-                if state.has_next_page:
+                state.pagination_metadata.has_next_page = (
+                    len(state.result) > state.pagination_metadata.page_size
+                )
+                if state.pagination_metadata.has_next_page:
                     state.result = state.result[:-1]  # Remove the extra result
             case MongoQueryType.Simple:
                 # Add pagination to find query
@@ -709,13 +754,15 @@ async def handle_hard_query(state: QueryState) -> QueryState:
                     state.processed_output.project,
                 )
                 exec_query = exec_query.skip(skip_count).limit(
-                    state.page_size + 1,
+                    state.pagination_metadata.page_size + 1,
                 )
                 state.result = await exec_query.to_list(length=None)
 
                 # Check if there are more results
-                state.has_next_page = len(state.result) > state.page_size
-                if state.has_next_page:
+                state.pagination_metadata.has_next_page = (
+                    len(state.result) > state.pagination_metadata.page_size
+                )
+                if state.pagination_metadata.has_next_page:
                     state.result = state.result[:-1]  # Remove the extra result
     except Exception:
         logger.exception("Error parsing extraction response")
@@ -724,7 +771,7 @@ async def handle_hard_query(state: QueryState) -> QueryState:
         return state
 
 
-async def handle_vector_query(state: QueryState) -> QueryState:
+async def handle_vector_query(state: QueryState) -> UserState:
     """Run a user query as a vector search in MongoDB database.
 
     Generates embeddings for the user query and performs vector similarity
@@ -737,8 +784,8 @@ async def handle_vector_query(state: QueryState) -> QueryState:
 
     Returns
     -------
-    QueryState
-        Updated state with vector search results and pagination information
+    UserResponse
+        Final user response with pagination metadata
 
     Raises
     ------
@@ -747,11 +794,26 @@ async def handle_vector_query(state: QueryState) -> QueryState:
 
     """
     try:
+        secret_key = get_required_env("GAMESEARCH_SECRET_KEY")
         if not state.vector_embedding:
             user_embed = await app.embedding_service.generate_embeddings(state.query)
-            # Store embedding for pagination
+            vector_embedding = user_embed[0]
+            state.signature = encode_processed_query_or_vector(
+                vector_embedding,
+                secret_key,
+            )
+
             state.vector_embedding = user_embed[0]
-        skip_count = (state.page - 1) * state.page_size
+        else:
+            decode_processed_query_or_vector(
+                state.vector_embedding,
+                state.signature,
+                secret_key,
+            )
+
+        skip_count = (
+            state.pagination_metadata.page - 1
+        ) * state.pagination_metadata.page_size
 
         # Get extra results to enable pagination
         pipeline = [
@@ -761,7 +823,7 @@ async def handle_vector_query(state: QueryState) -> QueryState:
                     "path": "text_embeddings",
                     "queryVector": state.vector_embedding,
                     "numCandidates": 150,
-                    "limit": state.page_size + 1,
+                    "limit": state.pagination_metadata.page_size + 1,
                 },
             },
             {
@@ -779,8 +841,10 @@ async def handle_vector_query(state: QueryState) -> QueryState:
         state.result = await app.db["games"].aggregate(pipeline).to_list()
 
         # Check if there are more results
-        state.has_next_page = len(state.result) > state.page_size
-        if state.has_next_page:
+        state.pagination_metadata.has_next_page = (
+            len(state.result) > state.pagination_metadata.page_size
+        )
+        if state.pagination_metadata.has_next_page:
             state.result = state.result[:-1]  # Remove the extra result
     except Exception:
         logger.exception("Error running vector search")
@@ -817,18 +881,48 @@ def _convert_date_strings_to_datetime(obj: dict | list) -> dict[str, Any]:
                     obj[key] = datetime.datetime.strptime(
                         value,
                         "%Y-%m-%dT%H:%M:%SZ",
-                    ).astimezone(datetime.UTC)
+                    ).replace(tzinfo=datetime.UTC)
                 else:
                     obj[key] = datetime.datetime.strptime(
                         value,
                         "%Y-%m-%dT%H:%M:%S",
-                    ).astimezone(datetime.UTC)
+                    ).replace(tzinfo=datetime.UTC)
 
     elif isinstance(obj, list):
         for i, item in enumerate(obj):
             obj[i] = _convert_date_strings_to_datetime(item)
 
     return obj
+
+
+def encode_processed_query_or_vector(
+    processed_result: str | list[float],
+    secret_key: str,
+) -> str:
+    """Encode processed query with signature for verification."""
+    query_str = json.dumps(processed_result, separators=(",", ":"))
+
+    return hmac.new(secret_key.encode(), query_str.encode(), hashlib.sha256).hexdigest()
+
+
+def decode_processed_query_or_vector(
+    processed_result: str | list[float],
+    signature: str,
+    secret_key: str,
+) -> str:
+    """Decode processed query for verification."""
+    query_str = json.dumps(processed_result, separators=(",", ":"))
+    expected_signature = hmac.new(
+        secret_key.encode(),
+        query_str.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected_signature, signature):
+        msg = "Invalid processed output signature"
+        raise ValueError(msg)
+
+    return processed_result
 
 
 def compile_agent_workflow() -> CompiledGraph:
@@ -890,7 +984,7 @@ async def health_check() -> dict[str, str]:
 
 
 @app.post("/search")
-async def search(user_state: QueryState) -> QueryState:
+async def search(user_state: UserState) -> UserState:
     """Search for games using natural language queries.
 
     Processes user queries through safety evaluation and routes them to either
@@ -899,8 +993,8 @@ async def search(user_state: QueryState) -> QueryState:
 
     Parameters
     ----------
-    user_state : QueryState
-        Query state containing search parameters and pagination metadata
+    user_state : UserState
+        User state containing search parameters and pagination metadata
 
     Returns
     -------
@@ -921,16 +1015,17 @@ async def search(user_state: QueryState) -> QueryState:
             detail="The search query was empty",
         )
 
-    user_state.genres_list = app.genres
+    state = QueryState.model_validate(user_state.model_dump())
+    state.genres_list = app.genres
 
     try:
-        if user_state.vector_embedding:
-            response = await handle_vector_query(user_state)
-        elif user_state.processed_output:
-            response = await handle_hard_query(user_state)
+        if state.vector_embedding:
+            response = await handle_vector_query(state)
+        elif state.processed_output:
+            response = await handle_hard_query(state)
         else:
             # Normal workflow execution
-            response = await chain.ainvoke(user_state)
+            response = await chain.ainvoke(state)
 
     except KeyError as e:
         logger.exception("Malformed LLM response")
@@ -952,7 +1047,7 @@ async def search(user_state: QueryState) -> QueryState:
         ) from e
 
     else:
-        return response
+        return UserState.model_validate(response)
 
 
 def main() -> None:
