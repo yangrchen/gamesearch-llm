@@ -94,7 +94,7 @@
 
 			<!-- Page numbers -->
 			<div class="flex items-center gap-1">
-				{#each visiblePages as page}
+				{#each visiblePages() as page}
 					<button
 						onclick={() => goToPage(page)}
 						disabled={loading}

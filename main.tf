@@ -36,6 +36,7 @@ module "app" {
   mongodbatlas_dbuser_password     = var.mongodbatlas_dbuser_password
   voyageai_api_key                 = var.voyageai_api_key
   anthropic_api_key                = var.anthropic_api_key
+  gamesearch_secret_key            = var.gamesearch_secret_key
 }
 
 module "mongodb" {

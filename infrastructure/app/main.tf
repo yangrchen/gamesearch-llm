@@ -562,6 +562,10 @@ resource "aws_ecs_task_definition" "backend" {
           value = var.anthropic_api_key
         },
         {
+          name  = "GAMESEARCH_SECRET_KEY"
+          value = var.gamesearch_secret_key
+        },
+        {
           name  = "ALLOWED_ORIGINS"
           value = "https://${var.domain_name},https://www.${var.domain_name},https://${var.api_subdomain}.${var.domain_name}"
         },

@@ -534,8 +534,8 @@ class UserState(BaseModel):
         Verification signature for processed results
     result : list[Any] or None
         Query execution results
-    error : str or None
-        Error message if query processing failed
+    violation : str or None
+        Violation reason message if not allowed
 
     """
 
@@ -546,7 +546,7 @@ class UserState(BaseModel):
     processed_output: MongoQueryOutput | None = None
     signature: str | None = None
     result: list[Any] | None = None
-    error: str | None = None
+    violation: str | None = None
 
 
 class QueryState(UserState):
@@ -648,7 +648,7 @@ def handle_not_allowed(state: QueryState) -> QueryState:
         Updated state with error message
 
     """
-    state.error = "This type of query is not allowed. Please try again with a  search for game-related topics."
+    state.violation = "This type of query is not allowed. Please try again with a  search for game-related topics."
 
     return state
 
@@ -1012,7 +1012,6 @@ async def search(user_state: UserState) -> UserState:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="The search query was empty",
         )
-
     state = QueryState.model_validate(user_state.model_dump())
     state.genres_list = app.genres
 

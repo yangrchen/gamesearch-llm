@@ -65,3 +65,9 @@ variable "anthropic_api_key" {
   type        = string
   sensitive   = true
 }
+
+variable "gamesearch_secret_key" {
+  description = "Secret key for Gamesearch backend"
+  type        = string
+  sensitive   = true
+}
