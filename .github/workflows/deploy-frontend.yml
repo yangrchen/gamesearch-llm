@@ -41,6 +41,7 @@ jobs:
             - name: Install dependencies
               run: |
                   cd frontend
+                  pnpm install
                   pnpm run build
               env:
                   PUBLIC_API_URL: https://api.gamesearch.app
