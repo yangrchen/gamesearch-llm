@@ -2,14 +2,15 @@
 	import GameCard from '$lib/components/GameCard.svelte';
 	import Pagination from '$lib/components/Pagination.svelte';
 	import PageSizeSelector from '$lib/components/PageSizeSelector.svelte';
-	import type { Game, SearchResponse } from '$lib/types';
+	import type { Game, UserState } from '$lib/types';
+	import { PUBLIC_API_URL } from '$env/static/public';
 
 	let searchQuery = $state('');
 	let games = $state<Game[]>([]);
 	let loading = $state(false);
 	let error = $state<string | null>(null);
 	let useVectorSearch = $state(false);
-	let searchResponse = $state<SearchResponse | null>(null);
+	let searchResponse = $state<UserState | null>(null);
 	let currentPage = $state(1);
 	let pageSize = $state(12);
 
@@ -33,38 +34,36 @@
 		error = null;
 
 		try {
-			const response = await fetch('/api/search', {
+			const requestBody: UserState = {
+				query: searchQuery,
+				use_vector_search: useVectorSearch,
+				pagination_metadata: {
+					page: currentPage,
+					page_size: pageSize,
+					has_next_page: false
+				}
+			};
+			const response = await fetch(`${PUBLIC_API_URL}/search`, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json'
 				},
-				body: JSON.stringify({
-					query: searchQuery,
-					use_vector_search: useVectorSearch,
-					page: currentPage,
-					page_size: pageSize
-				})
+				body: JSON.stringify(requestBody)
 			});
 
 			if (!response.ok) {
 				throw new Error(`Search failed with status: ${response.status}`);
 			}
 
-			const data: SearchResponse = await response.json();
+			const data: UserState = await response.json();
 
-			// Check for backend errors
-			if (data.error) {
-				throw new Error(data.error);
+			// Check if query was allowed
+			if (data.violation) {
+				throw new Error(data.violation);
 			}
 
-			// Check if query was blocked
-			if (data.evaluation_output && !data.evaluation_output.is_allowed) {
-				throw new Error(data.evaluation_output.violation_reason || 'Query not allowed');
-			}
-
-			console.log('Search response:', data);
 			searchResponse = data;
-			games = data.result;
+			games = data.result as Game[];
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to search games';
 			games = [];
@@ -82,19 +81,16 @@
 		error = null;
 
 		try {
-			const requestBody = {
-				query: searchQuery,
-				page: page,
-				page_size: pageSize,
-				use_vector_search: searchResponse.use_vector_search,
-				...(searchResponse.use_vector_search
-					? { vector_embedding: searchResponse.vector_embedding }
-					: {
-							processed_output: searchResponse.processed_output
-						})
+			const requestBody: UserState = {
+				...searchResponse,
+				pagination_metadata: {
+					page: page,
+					page_size: pageSize,
+					has_next_page: searchResponse.pagination_metadata.has_next_page
+				}
 			};
 
-			const response = await fetch('/api/search', {
+			const response = await fetch(`${PUBLIC_API_URL}/search`, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json'
@@ -106,18 +102,17 @@
 				throw new Error(`Pagination failed with status: ${response.status}`);
 			}
 
-			const data: SearchResponse = await response.json();
+			const data: UserState = await response.json();
 
-			if (data.error) {
-				throw new Error(data.error);
+			if (data.violation) {
+				throw new Error(data.violation);
 			}
 
-			console.log('Pagination response:', data);
-			games = data.result;
-			searchResponse = { ...searchResponse, ...data };
+			searchResponse = data;
+			games = data.result as Game[];
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to load page';
-			currentPage = searchResponse.page; // Reset to previous page
+			currentPage = searchResponse.pagination_metadata.page; // Reset to previous page
 		} finally {
 			loading = false;
 		}
@@ -160,25 +155,6 @@
 				>
 					🎮 Gamesearch
 				</h1>
-				<div class="text-sm text-slate-400">
-					Powered by AI •
-					{#if searchResponse}
-						Page {searchResponse.page} • {games.length} results •
-					{:else}
-						{games.length} results •
-					{/if}
-					<span class={useVectorSearch ? 'text-pink-400' : 'text-purple-400'}>
-						{useVectorSearch ? 'AI Search' : 'Structured Search'}
-					</span>
-					{#if searchResponse && searchResponse.page > 1}
-						<span
-							class="ml-2 inline-flex items-center gap-1 rounded-full bg-green-500/20 px-2 py-1 text-xs font-medium text-green-400"
-						>
-							<span class="icon-[material-symbols--bolt] text-xs"></span>
-							Fast pagination
-						</span>
-					{/if}
-				</div>
 			</div>
 		</div>
 	</header>
@@ -338,8 +314,11 @@
 							<h3 class="text-xl font-semibold text-white">Search Results</h3>
 							<div class="mt-1 text-sm text-slate-400">
 								{#if searchResponse}
-									Page {searchResponse.page} • {games.length} game{games.length !== 1 ? 's' : ''} shown
-									{#if searchResponse.has_next_page}
+									Page {searchResponse.pagination_metadata.page} • {games.length} game{games.length !==
+									1
+										? 's'
+										: ''} shown
+									{#if searchResponse.pagination_metadata.has_next_page}
 										• More available
 									{/if}
 								{:else}
@@ -349,7 +328,7 @@
 						</div>
 
 						<div class="flex items-center gap-4">
-							{#if searchResponse && searchResponse.page > 1}
+							{#if searchResponse && searchResponse.pagination_metadata.page > 1}
 								<div class="flex items-center gap-2 text-xs text-green-400">
 									<span class="icon-[material-symbols--speed] text-sm"></span>
 									<span>Optimized pagination active</span>
@@ -382,7 +361,7 @@
 										{/if}
 									</div>
 								</div>
-								{#if searchResponse.page > 1}
+								{#if searchResponse.pagination_metadata.page > 1}
 									<div class="flex items-center gap-2 text-green-400">
 										<span class="icon-[material-symbols--bolt] text-sm"></span>
 										<span class="text-xs">Fast pagination (no AI re-processing)</span>
@@ -403,9 +382,9 @@
 					<!-- Pagination -->
 					{#if searchResponse}
 						<Pagination
-							currentPage={searchResponse.page}
-							hasNextPage={searchResponse.has_next_page}
-							pageSize={searchResponse.page_size}
+							currentPage={searchResponse.pagination_metadata.page}
+							hasNextPage={searchResponse.pagination_metadata.has_next_page}
+							pageSize={searchResponse.pagination_metadata.page_size}
 							onPageChange={changePage}
 							{loading}
 						/>

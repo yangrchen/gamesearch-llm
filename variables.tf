@@ -8,11 +8,6 @@ variable "s3_data_bucket_name" {
   type        = string
 }
 
-variable "s3_lambda_package_bucket_name" {
-  description = "Name of the S3 bucket to store lambda packages"
-  type        = string
-}
-
 variable "igdb_client_id" {
   description = "IGDB API Client ID"
   type        = string
@@ -61,6 +56,18 @@ variable "mongodbatlas_dbuser_password" {
 
 variable "voyageai_api_key" {
   description = "API key for Voyage AI embedding service"
+  type        = string
+  sensitive   = true
+}
+
+variable "anthropic_api_key" {
+  description = "API key for Anthropic LLMs"
+  type        = string
+  sensitive   = true
+}
+
+variable "gamesearch_secret_key" {
+  description = "Secret key for Gamesearch backend"
   type        = string
   sensitive   = true
 }

@@ -6,4 +6,4 @@ WORKDIR /app
 
 RUN uv sync --frozen
 
-CMD ["uv", "run", "gamesearch-base"]
+CMD ["uv", "run", "gamesearch-backend"]

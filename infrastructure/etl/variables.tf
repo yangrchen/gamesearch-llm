@@ -8,11 +8,6 @@ variable "s3_data_bucket_name" {
   type        = string
 }
 
-variable "s3_lambda_package_bucket_name" {
-  description = "Name of the S3 bucket to store lambda packages"
-  type        = string
-}
-
 variable "igdb_client_id" {
   description = "IGDB API Client ID"
   type        = string

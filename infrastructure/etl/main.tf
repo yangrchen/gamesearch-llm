@@ -1,7 +1,3 @@
-provider "aws" {
-  region = var.aws_region
-}
-
 resource "aws_ecr_repository" "gamesearch_lambda_repo" {
   name                 = "gamesearch-lambdas"
   image_tag_mutability = "MUTABLE"
