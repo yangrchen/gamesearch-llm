@@ -96,7 +96,7 @@ jobs:
                   # Get the CloudFront distribution ID
                   CLOUDFRONT_ID=$(terraform output -raw cloudfront_distribution_id)
                   echo "cloudfront_id=$CLOUDFRONT_ID" >> $GITHUB_OUTPUT
-              with:
+              env:
                   TF_VAR_aws_region: ${{ env.AWS_REGION }}
                   TF_VAR_mongodbatlas_connection_uri_base: ${{ secrets.MONGODB_CONNECTION_URI }}
                   TF_VAR_mongodbatlas_dbuser_user: ${{ secrets.MONGODB_USER }}
