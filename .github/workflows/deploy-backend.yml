@@ -56,7 +56,7 @@ jobs:
             - name: Download current task definition
               run: |
                   aws ecs describe-task-definition \
-                  --task-definition ${{ env.ECS_SERVICE }} @
+                  --task-definition ${{ env.ECS_SERVICE }} \
                   --query 'taskDefinition' \
                   --output json > task-definition.json
 
