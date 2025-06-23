@@ -528,10 +528,20 @@ resource "aws_ecs_task_definition" "backend" {
   memory                   = "512"
   execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
 
+  lifecycle {
+    create_before_destroy = true
+    ignore_changes = [
+      container_definitions,
+    ]
+  }
+
   container_definitions = jsonencode([
     {
-      name  = "gamesearch-backend"
-      image = "${aws_ecr_repository.backend_repo.repository_url}:latest"
+      name = "gamesearch-backend"
+      # image = "${aws_ecr_repository.backend_repo.repository_url}:latest"
+      # Placeholder image for when the container may not exist initially
+      # Actual image will be provided during CI/CD deployment
+      image = "public.ecr.aws/docker/library/hello-world:latest"
 
       portMappings = [
         {
@@ -607,8 +617,17 @@ resource "aws_ecs_service" "backend" {
   name            = "gamesearch-backend"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.backend.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
+
+  # Baseline desired count for initial setup
+  desired_count = 1
+  launch_type   = "FARGATE"
+
+  lifecycle {
+    ignore_changes = [
+      task_definition,
+      desired_count,
+    ]
+  }
 
   network_configuration {
     security_groups  = [aws_security_group.fargate.id]
