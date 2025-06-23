@@ -77,3 +77,14 @@ jobs:
                   service: ${{ env.ECS_CLUSTER }}
                   cluster: ${{ env.ECS_CLUSTER }}
                   wait-for-service-stability: true
+
+            - name: Scale ECS service to 1 task
+              run: |
+                  aws ecs update-service \
+                  --cluster ${{ env.ECS_CLUSTER }} \
+                  --service ${{ env.ECS_SERVICE }} \
+                  --desired-count 1
+
+                  aws ecs wait services-stable
+                  --cluster ${{ env.ECS_CLUSTER }}
+                  --services ${{ env.ECS_SERVICE }}
