@@ -10,10 +10,16 @@ terraform {
 
 provider "aws" {
   region = var.aws_region
+
+  default_tags {
+    tags = {
+      Project = "gamesearch"
+    }
+  }
 }
 
 module "etl" {
-  source = "./infrastructure/etl"
+  source = "./etl"
 
   aws_region          = var.aws_region
   s3_data_bucket_name = var.s3_data_bucket_name
@@ -28,7 +34,7 @@ module "etl" {
 }
 
 module "app" {
-  source = "./infrastructure/app"
+  source = "./app"
 
   aws_region                       = var.aws_region
   mongodbatlas_connection_uri_base = module.mongodb.mongodbatlas_connection_uri_base
@@ -40,7 +46,7 @@ module "app" {
 }
 
 module "mongodb" {
-  source = "./infrastructure/mongodb"
+  source = "./mongodb"
 
   mongodbatlas_public_key      = var.mongodbatlas_public_key
   mongodbatlas_private_key     = var.mongodbatlas_private_key

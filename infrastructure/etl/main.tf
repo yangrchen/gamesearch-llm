@@ -172,13 +172,8 @@ resource "aws_security_group" "ecs_task_sg" {
   }
 }
 
-resource "aws_ecs_cluster" "gamesearch_cluster" {
-  name = "gamesearch-cluster"
-
-  setting {
-    name  = "containerInsights"
-    value = "enabled"
-  }
+data "aws_ecs_cluster" "gamesearch_cluster" {
+  cluster_name = "gamesearch-cluster"
 }
 
 resource "aws_cloudwatch_log_group" "ecs_log_group" {
@@ -331,7 +326,7 @@ resource "aws_cloudwatch_event_rule" "extract_completed" {
 resource "aws_cloudwatch_event_target" "transform_ecs_target" {
   rule      = aws_cloudwatch_event_rule.extract_completed.name
   target_id = "TransformECSTask"
-  arn       = aws_ecs_cluster.gamesearch_cluster.arn
+  arn       = data.aws_ecs_cluster.gamesearch_cluster.arn
   role_arn  = aws_iam_role.eventbridge_ecs_role.arn
 
   ecs_target {
