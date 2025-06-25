@@ -16,9 +16,9 @@ The backend is built with FastAPI and uses LangGraph for agent orchestration. It
 ```
 backend/
 ├── src/
-│ └── backend/
-│ ├── main.py # FastAPI application entry point
-├── pyproject.toml # Project dependencies
+│   └── backend/
+│       └── main.py     # FastAPI application entry point
+└── pyproject.toml      # Project dependencies
 ```
 
 ## Key Features
@@ -34,4 +34,4 @@ See [setup-and-config.md](./setup-and-config.md) for detailed setup instructions
 
 ## API Endpoints
 
-For detailed API documentation, see [API Documentation](../api/README.md).
+For detailed API documentation, see [API Endpoints](../api/README.md).
