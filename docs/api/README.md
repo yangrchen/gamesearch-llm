@@ -15,39 +15,40 @@ Search for games using natural language queries.
 
 **Request Body**:
 
-````json
+```json
 {
-  "query": "string",
-  "use_vector_search": false,
-  "pagination_metadata": {
-    "page": 1,
-    "page_size": 20
-  }
+    "query": "string",
+    "use_vector_search": false,
+    "pagination_metadata": {
+        "page": 1,
+        "page_size": 20
+    }
 }
+```
 
 **Response**:
 
 ```json
 {
-  "query": "string",
-  "use_vector_search": false,
-  "pagination_metadata": {
-    "page": 1,
-    "page_size": 20,
-    "has_next_page": true
-  },
-  "result": [
-    {
-      "_id": 1,
-      "name": "string",
-      "first_release_date": "2023-01-01",
-      "genres": ["string"],
-      "summary": "string"
-    }
-  ],
-  "signature": "string"
+    "query": "string",
+    "use_vector_search": false,
+    "pagination_metadata": {
+        "page": 1,
+        "page_size": 20,
+        "has_next_page": true
+    },
+    "result": [
+        {
+            "_id": 1,
+            "name": "string",
+            "first_release_date": "2023-01-01",
+            "genres": ["string"],
+            "summary": "string"
+        }
+    ],
+    "signature": "string"
 }
-````
+```
 
 **Status Codes**:
 
