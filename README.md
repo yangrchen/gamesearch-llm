@@ -15,21 +15,6 @@ AI-powered search engine that allows users to find games using natural language 
 - **Modern UI**: Built with SvelteKit and TailwindCSS
 - **Content Safety**: Built-in guardrails to ensure appropriate search queries
 
-## 🏗️ Architecture
-
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Frontend      │    │    Backend      │    │   Database      │
-│   (SvelteKit)   │───▶│   (FastAPI)     │───▶│   (MongoDB)     │
-│                 │    │   + LangGraph   │    │   + Atlas       │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-                               │
-                       ┌───────▼───────┐
-                       │  ETL Pipeline │
-                       │  (Go Lambdas) │
-                       └───────────────┘
-```
-
 ## 🚀 Local Development Quickstart
 
 ### Prerequisites
