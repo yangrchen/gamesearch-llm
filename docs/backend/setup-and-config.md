@@ -16,7 +16,7 @@ This guide covers the complete setup and configuration process for the Gamesearc
 
 ```bash
 git clone https://github.com/yangrchen/gamesearch-llm.git
-cd gamesearch/backend
+cd gamesearch/backend/src/backend
 ```
 
 2. **Configure environment variables**
